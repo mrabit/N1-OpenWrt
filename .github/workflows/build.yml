@@ -15,8 +15,8 @@ on:
         default: 'false'
         type: choice
         options:
-          - true
-          - false
+          - 'true'
+          - 'false'
       profile:
         description: 'Profile(s) to build'
         required: false
@@ -43,28 +43,37 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
+  # `matrix` context is NOT available in a job-level `if` (only github/needs/
+  # vars/inputs are), so filtering the matrix there causes a startup_failure.
+  # Instead, build the matrix dynamically here from the `profile` input and let
+  # `build` consume it via fromJSON — a single-profile run yields a 1-entry matrix.
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Compute build matrix
+        id: set
+        env:
+          PROFILE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.profile || 'all' }}
+        run: |
+          set -euo pipefail
+          n1='{"profile":"N1","target_dir":"armsr/armv8","config":"armsr/armv8/N1/.config","diy":"armsr/armv8/N1/diy.sh","cache":"n1"}'
+          x86='{"profile":"x86","target_dir":"x86/64","config":"x86/64/.config","diy":"common/diy.sh","cache":"x86"}'
+          case "$PROFILE" in
+            N1)  include="[$n1]" ;;
+            x86) include="[$x86]" ;;
+            *)   include="[$n1,$x86]" ;;
+          esac
+          echo "matrix={\"include\":$include}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: setup
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - profile: N1
-            target_dir: armsr/armv8
-            config: armsr/armv8/N1/.config
-            diy: armsr/armv8/N1/diy.sh
-            cache: n1
-          - profile: x86
-            target_dir: x86/64
-            config: x86/64/.config
-            diy: common/diy.sh
-            cache: x86
-    # Manual runs can pick a single profile; schedule/push build both.
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      github.event.inputs.profile == 'all' ||
-      github.event.inputs.profile == matrix.profile
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     steps:
     - name: Checkout
