@@ -1,0 +1,270 @@
+name: Build ImmortalWrt-25.12 firmware
+
+# Unified N1 + x86/64 build. A matrix `build` job compiles each profile in
+# parallel (they share ~95% of the steps); a single `release` job then collects
+# every profile's image and publishes ONE combined release (assets in one place).
+# N1 images are additionally pushed to the fixed `OpenWrt` tag that
+# luci-app-amlogic (晶晨宝盒) OTA reads — x86 images never land there.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - true
+          - false
+      profile:
+        description: 'Profile(s) to build'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - N1
+          - x86
+  schedule:
+    - cron: "27 18 1,16 * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-25.12
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: N1
+            target_dir: armsr/armv8
+            config: armsr/armv8/N1/.config
+            diy: armsr/armv8/N1/diy.sh
+            cache: n1
+          - profile: x86
+            target_dir: x86/64
+            config: x86/64/.config
+            diy: common/diy.sh
+            cache: x86
+    # Manual runs can pick a single profile; schedule/push build both.
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      github.event.inputs.profile == 'all' ||
+      github.event.inputs.profile == matrix.profile
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7.0.1
+
+    - name: Free up disk space
+      uses: jlumbroso/free-disk-space@v1.3.1
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: Initialize environment
+      timeout-minutes: 45
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        set -euxo pipefail
+        sudo -E apt-get update
+        sudo -E "$GITHUB_WORKSPACE/bin/build-deps.sh"
+        sudo -E apt-get autoremove --purge -y
+        sudo -E apt-get clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH --single-branch --depth=1 openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        echo "FILE_DATE=$(date +"%Y%m%d")" >> $GITHUB_ENV
+    - name: Update & Install feeds
+      run: |
+        set -euo pipefail
+        chmod +x ${{ matrix.diy }} common/diy.sh
+        cd openwrt
+        update_feeds() {
+          for attempt in 1 2 3; do
+            ./scripts/feeds update -a && return 0
+            echo "Feed update failed (attempt $attempt/3), retrying..." >&2
+            sleep $((attempt * 5))
+          done
+          echo "Feed update failed after 3 attempts." >&2
+          return 1
+        }
+        update_feeds
+        COMMON_DIR="$GITHUB_WORKSPACE/common" $GITHUB_WORKSPACE/${{ matrix.diy }}
+        update_feeds
+        ./scripts/feeds install -a
+
+    - name: Load custom config
+      run: |
+        rm -rf openwrt/files openwrt/.config
+        # Shared overlay + profile config + shared service stack.
+        cp -r common/files openwrt/files
+        cp ${{ matrix.config }} openwrt/.config
+        cat common/config.services >> openwrt/.config
+        echo "CONFIG_CCACHE=y" >> openwrt/.config
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: /workdir/openwrt/.ccache
+        key: ccache-${{ matrix.cache }}-${{ env.REPO_BRANCH }}-${{ env.FILE_DATE }}
+        restore-keys: |
+          ccache-${{ matrix.cache }}-${{ env.REPO_BRANCH }}-
+
+    - name: Cache downloads
+      uses: actions/cache@v4
+      with:
+        path: /workdir/openwrt/dl
+        key: dl-${{ matrix.cache }}-${{ env.REPO_BRANCH }}-${{ env.FILE_DATE }}
+        restore-keys: |
+          dl-${{ matrix.cache }}-${{ env.REPO_BRANCH }}-
+
+    - name: SSH connect to Actions
+      uses: P3TERX/ssh2actions@v1.0.0
+      if: github.event.inputs.ssh == 'true'
+
+    - name: Download package
+      working-directory: ./openwrt
+      run: |
+        make defconfig
+        make download -j$(( $(nproc) * 2 ))
+        find dl -size -1k -exec rm -f {} \;
+
+    - name: Compile firmware
+      env:
+        CCACHE_MAXSIZE: 2G
+      run: |
+        chmod -R 755 openwrt
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(( $(nproc) + 1 )) || make -j1 V=s
+    - name: Package N1 firmware (ophub)
+      if: matrix.profile == 'N1'
+      uses: ophub/amlogic-s9xxx-openwrt@main
+      with:
+        openwrt_path: openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
+        openwrt_board: s905d
+        kernel_repo: ophub/kernel
+        kernel_usage: flippy
+        openwrt_kernel: 6.12.y
+        openwrt_size: 256/1024
+        builder_name: mrabit
+
+    - name: Collect firmware
+      run: |
+        set -euo pipefail
+        mkdir -p "out/${{ matrix.profile }}"
+        if [ "${{ matrix.profile }}" = "N1" ]; then
+          # ophub exports PACKAGED_OUTPUTPATH with the flashable *.img.gz.
+          cp -v "$PACKAGED_OUTPUTPATH"/*.img.gz "out/${{ matrix.profile }}/"
+        else
+          # x86 emits a bootable combined image directly — publish only the
+          # squashfs combined-efi (sysupgrade-friendly, read-only root + overlay).
+          outdir="openwrt/bin/targets/x86/64"
+          cp -v "$outdir"/*squashfs-combined-efi.img.gz "out/${{ matrix.profile }}/" || {
+            echo "No squashfs-combined-efi image found in $outdir; contents:" >&2
+            ls -la "$outdir" >&2
+            exit 1
+          }
+        fi
+
+    - name: Upload profile artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-${{ matrix.profile }}
+        path: out/${{ matrix.profile }}/*.img.gz
+        if-no-files-found: error
+        retention-days: 3
+  release:
+    needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Set date
+      run: echo "FILE_DATE=$(TZ=$TZ date +"%Y%m%d")" >> $GITHUB_ENV
+
+    - name: Download all firmware artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: firmware-*
+        path: dist
+        merge-multiple: true
+
+    - name: List collected images
+      run: |
+        set -euo pipefail
+        echo "Collected images:"
+        find dist -name '*.img.gz' -printf '  %p (%s bytes)\n'
+        # N1 images (ophub) match the amlogic naming; x86 the immortalwrt one.
+        mkdir -p n1-only
+        find dist -name '*_s905d_*.img.gz' -exec cp -v {} n1-only/ \; || true
+
+    - name: Publish combined dated release
+      uses: softprops/action-gh-release@v3.0.2
+      with:
+        tag_name: firmware_${{ env.FILE_DATE }}
+        files: dist/*.img.gz
+        body: |
+          N1 (Amlogic S905D) + x86/64 EFI 固件，构建于 ${{ env.FILE_DATE }}。
+          * N1: openwrt_amlogic_s905d_*.img.gz —— 晶晨宝盒可在线升级
+          * x86: immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz —— UEFI 引导
+          * 基本信息
+          IP: 192.168.0.4
+          账户: root
+          密码: password
+
+    - name: Update rolling release (latest)
+      uses: softprops/action-gh-release@v3.0.2
+      with:
+        tag_name: latest
+        files: dist/*.img.gz
+        body: |
+          滚动更新的最新固件（N1 + x86），构建于 ${{ env.FILE_DATE }}。
+          历史版本见 firmware_<日期> 标签。
+          * 基本信息
+          IP: 192.168.0.4
+          账户: root
+          密码: password
+
+    - name: Update N1 OTA release (amlogic 在线升级源)
+      # luci-app-amlogic OTA pulls from this fixed tag (see files/etc/config/amlogic).
+      # N1 images ONLY — x86 never lands here, so 晶晨宝盒 can't offer the wrong image.
+      if: ${{ hashFiles('n1-only/*.img.gz') != '' }}
+      uses: softprops/action-gh-release@v3.0.2
+      with:
+        tag_name: OpenWrt
+        files: n1-only/*.img.gz
+        body: |
+          滚动更新的最新 N1 固件（luci-app-amlogic 在线升级源），构建于 ${{ env.FILE_DATE }}。
+          历史版本见 firmware_<日期> 标签。
+          * 基本信息
+          IP: 192.168.0.4
+          账户: root
+          密码: password
+

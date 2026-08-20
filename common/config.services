@@ -1,0 +1,35 @@
+# Shared package selection for every profile (N1, x86, ...).
+#
+# Appended onto the per-profile .config before `make defconfig`. Holds the arch-
+# agnostic bits: the bypass-router service stack plus common userland/luci tweaks.
+# Anything target/rootfs/kmod-specific stays in the profile's own .config.
+
+# common userland / luci
+CONFIG_PACKAGE_autocore=y
+CONFIG_PACKAGE_fstrim=y
+CONFIG_PACKAGE_zoneinfo-asia=y
+CONFIG_PACKAGE_luci-app-filetransfer=n
+CONFIG_PACKAGE_ppp=n
+
+# bypass router services
+# PassWall (proxy/shunt) — cores (xray/sing-box/chinadns-ng/geoview/ipt2socks) pulled as deps by defconfig.
+# SS cores use sing-box/xray built-ins; rust sslocal/ssserver disabled — they pull rust/host,
+# whose download-ci-llvm 404s on aarch64 hosts (rust CI artifacts pruned), breaking that build.
+# Kept off on x86 too for parity: the built-in SS cores already cover it, no need for rust/host.
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server is not set
+# AdGuardHome (DNS filtering)
+CONFIG_PACKAGE_adguardhome=y
+CONFIG_PACKAGE_luci-app-adguardhome=y
+# SNMP (monitoring, SSL variants)
+CONFIG_PACKAGE_snmpd-ssl=y
+CONFIG_PACKAGE_snmp-utils-ssl=y
+CONFIG_PACKAGE_snmp-mibs=y
+CONFIG_PACKAGE_luci-app-snmpd=y
+CONFIG_PACKAGE_luci-i18n-snmpd-zh-cn=y
+# KMS (vlmcsd)
+CONFIG_PACKAGE_vlmcsd=y
+CONFIG_PACKAGE_luci-app-vlmcsd=y
+CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn=y

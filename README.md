@@ -1,31 +1,43 @@
 # 项目简介
 
-本固件适配斐讯 N1，定位**轻量旁路由**，不含 PPPoE、WiFi 相关功能。预置了旁路由常用服务集，但代理节点/订阅、服务配置等私有数据仍留给刷机后自行配置。
+本固件定位**轻量旁路由**，不含 PPPoE、WiFi 相关功能。预置了旁路由常用服务集，但代理节点/订阅、服务配置等私有数据仍留给刷机后自行配置。目前提供两种构建目标（profile）：
+
+- **N1**（`armsr/armv8/N1`）：斐讯 N1（Amlogic S905D），经 ophub/flippy 打包为可刷写的 `*.img.gz`，含 [luci-app-amlogic](https://github.com/ophub/luci-app-amlogic)（晶晨宝盒）在线升级。
+- **x86**（`x86/64`）：x86/64 通用机型（软路由/虚拟机），OpenWrt 直接产出可 UEFI 引导的 `*-generic-squashfs-combined-efi.img.gz`，无需二次打包，也不含 luci-app-amlogic。
+
+两种 profile 共享同一套旁路由服务与 overlay（见 `common/`），只有 target/rootfs/打包流程不同。
 
 固件预置的 luci-app 与服务：
 
-- [luci-app-amlogic](https://github.com/ophub/luci-app-amlogic)：系统更新、内核更新、CPU 调频等
 - PassWall（luci-app-passwall，内核 sing-box/xray-core）：代理分流
 - AdGuardHome：DNS 过滤
 - SNMP（snmpd）：监控
 - KMS（vlmcsd）：激活服务
+- （仅 N1）luci-app-amlogic：系统更新、内核更新、CPU 调频等
 
-首启会通过 `etc/uci-defaults/99-bypass-router` 自动完成旁路由基础设置：关闭 DHCP/DHCPv6、开启 IPv4 转发、启用软件流量卸载（S905D 无硬件 offload，硬件卸载与 fullcone NAT 均关闭以免 firewall4 加载失败）、设置时区（Asia/Shanghai）与国内 NTP 服务器。
+首启会通过 `etc/uci-defaults/99-bypass-router` 自动完成旁路由基础设置：关闭 DHCP/DHCPv6、开启 IPv4 转发、启用软件流量卸载（S905D 无硬件 offload，硬件卸载与 fullcone NAT 均关闭以免 firewall4 加载失败）、设置时区（Asia/Shanghai）与国内 NTP 服务器。amlogic 相关配置仅在检测到 `/etc/config/amlogic` 时写入，x86 上自动跳过。
 
-LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `armsr/armv8/N1/files/etc/config/network` 调整）。
+LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `common/files/etc/config/network` 调整，两 profile 共用）。
 
 ## 本地构建
 
-在仓库根目录直接执行：
+在仓库根目录直接执行（`bin/build.sh` 是入口，按 profile 分发到 `bin/build-N1.sh` / `bin/build-x86.sh`）：
 
 ```bash
-./bin/build.sh
+./bin/build.sh          # 不带参数：依次构建 N1 和 x86（两个）
+./bin/build.sh N1       # 只构建斐讯 N1（Amlogic S905D）
+./bin/build.sh x86      # 只构建 x86/64 EFI
 ```
 
-脚本会克隆 ImmortalWrt、跑 `diy.sh`、铺上 N1 的 overlay/config 并编译，产物默认输出到原生盘：
+> 每个 profile 都是独立的 20-30G / 完整 `make`，两个一起跑时间和磁盘都翻倍。x86 用独立 scratch 子树（`build-x86`/`feeds-x86`/`ccache-x86`），跟 N1 共存不冲突。N1 构建失败会中止、不再跑 x86。
+
+脚本会克隆 ImmortalWrt、跑对应的 `diy.sh`、铺上共享 overlay + profile 的 config 并编译。N1 产物在编译后经 ophub 打包为 `*.img.gz`；x86 直接产出可引导的 `*-generic-squashfs-combined-efi.img.gz`。
+
+**最终可刷写镜像**（两个 profile 都）落到仓库根的 `dist/`（已 git-ignore）：N1 由 `package.sh` 移入，x86 的 combined-efi 由 `build-x86.sh` 拷入。完整的中间产物（整个 `bin/targets`）另外输出到原生盘：
 
 ```bash
-/opt/openwrt-build/output/bin/targets/armsr/armv8/
+/opt/openwrt-build/output/bin/targets/armsr/armv8/   # N1 中间产物
+/opt/openwrt-build/output/bin/targets/x86/64/        # x86 中间产物
 ```
 
 > **构建目录必须落在原生文件系统上。** OpenWrt 编译树有大量并行小文件写入，在 virtiofs/macOS 挂载点上会损坏（perl/ncurses 等 host 工具随机构建失败）。脚本默认把编译树、缓存和产物都放在 `/opt/openwrt-build`（`BUILD_ROOT`），仓库本身留在原处不受污染。想把产物取回仓库时用 `ARTIFACT_DIR=./output ./bin/build.sh` 覆盖即可。
@@ -38,13 +50,13 @@ LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `armsr/a
 sudo ./bin/build-deps.sh
 ```
 
-另需一份预编译 Go 作为外部 bootstrap（OpenWrt Go ≥1.26 需要 ≥1.24.6 的 bootstrap，arm64 上不能从源码起），装到 `/usr/local/go-bootstrap`（`GO_BOOTSTRAP`）。脚本检测不到时会打印安装命令。
+**N1 另需**一份预编译 Go 作为外部 bootstrap（OpenWrt Go ≥1.26 需要 ≥1.24.6 的 bootstrap，arm64 上不能从源码起），装到 `/usr/local/go-bootstrap`（`GO_BOOTSTRAP`）。脚本检测不到时会打印安装命令。x86 可从源码起 Go，`GO_BOOTSTRAP` 存在则复用、缺失也不强制。
 
-常用覆盖项：
+常用覆盖项（对两个 profile 通用）：
 
 ```bash
-BUILD_ROOT=/mnt/ssd/owrt ./bin/build.sh          # 换构建盘
-ARTIFACT_DIR=./output ./bin/build.sh              # 产物取回仓库
+BUILD_ROOT=/mnt/ssd/owrt ./bin/build.sh x86       # 换构建盘
+ARTIFACT_DIR=./output ./bin/build.sh x86          # 产物取回仓库
 ALL_PROXY=socks5h://127.0.0.1:1080 ./bin/build.sh # 换代理
 JOBS=4 ./bin/build.sh                             # 限并发
 ```

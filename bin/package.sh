@@ -73,11 +73,17 @@ fi
 # the nodes into existence with `partx` (an ioctl that works regardless of
 # max_part) right after remake's losetup call. `partx -d` first clears any
 # partial nodes; both are `|| true` so remake's `set -e` can't trip on them.
+# After partx we poll until p1+p2 are block devices, then sleep 1s: partx
+# creates the nodes synchronously, but a scanner (blkid/udev worker) can grab
+# a freshly-created node for a moment, and the very next mkfs.vfat then fails
+# on a busy device (its error is swallowed by remake's `>/dev/null 2>&1`,
+# leaving p1 unformatted -> the later vfat mount 10x-fails). `udevadm settle`
+# is a no-op without udevd, so the explicit wait+sleep is what closes the race.
 # Re-applied every run because the reset/clone above restores pristine remake.
 remake_anchor='loop_new="$(losetup -P -f --show'
 if grep -qF "$remake_anchor" "$OPHUB_DIR/remake"; then
     if ! grep -qF 'partx -a "${loop_new}"' "$OPHUB_DIR/remake"; then
-        sed -i '/loop_new="$(losetup -P -f --show/a\    partx -d "${loop_new}" 2>/dev/null || true; partx -a "${loop_new}" 2>/dev/null || true; udevadm settle 2>/dev/null || true' "$OPHUB_DIR/remake"
+        sed -i '/loop_new="$(losetup -P -f --show/a\    partx -d "${loop_new}" 2>/dev/null || true; partx -a "${loop_new}" 2>/dev/null || true; udevadm settle 2>/dev/null || true; for _i in $(seq 1 50); do [ -b "${loop_new}p1" ] && [ -b "${loop_new}p2" ] && break; sleep 0.2; done; sleep 1' "$OPHUB_DIR/remake"
     fi
 else
     echo "WARN: ophub remake losetup anchor not found; loop-partition workaround" >&2
