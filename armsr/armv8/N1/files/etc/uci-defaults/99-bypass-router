@@ -1,0 +1,184 @@
+#!/bin/sh
+
+# N1 bypass-router defaults. The uci-defaults runner removes this file after success.
+
+set -u
+
+service_enable_if_present() {
+	service="$1"
+	[ -x "/etc/init.d/$service" ] || return 0
+	"/etc/init.d/$service" enable >/dev/null 2>&1 || true
+}
+
+service_restart_if_present() {
+	service="$1"
+	[ -x "/etc/init.d/$service" ] || return 0
+	"/etc/init.d/$service" restart >/dev/null 2>&1 || true
+}
+
+if [ -f /etc/config/network ]; then
+	uci -q set network.lan.gateway='192.168.0.1'
+	uci -q set network.lan.delegate='0'
+	uci -q set network.lan.peerdns='0'
+	uci -q delete network.lan.dns
+	uci -q add_list network.lan.dns='192.168.0.1'
+	uci -q add_list network.lan.dns='223.5.5.5'
+	uci -q add_list network.lan.dns='119.29.29.29'
+	uci -q commit network
+fi
+
+# Point the resolver at the netifd-generated upstream list (192.168.0.1 / 223.5.5.5 /
+# 119.29.29.29) rather than the stock 127.0.0.1 stub. In bypass-router mode nothing
+# serves 127.0.0.1:53 at boot (dnsmasq is off, no AdGuardHome yet), so self-resolution
+# and apk would otherwise fail. The auto file lives on tmpfs and netifd rebuilds it from
+# network.lan.dns each boot; this symlink lives on the btrfs root and persists. If the
+# auto file is not present yet the link is momentarily dangling and self-heals once
+# netifd brings up lan.
+ln -sf /tmp/resolv.conf.d/resolv.conf.auto /etc/resolv.conf
+
+if [ -f /etc/config/dhcp ]; then
+	uci -q set dhcp.lan.dhcpv4='disabled'
+	uci -q set dhcp.lan.dhcpv6='disabled'
+	uci -q set dhcp.lan.ra='disabled'
+	uci -q set dhcp.@dnsmasq[0].dns_redirect='0'
+	# port=0: dnsmasq stops listening on :53 entirely, so AdGuardHome can bind it.
+	# Even if PassWall pulls dnsmasq back up it won't take :53 (runbook §3).
+	uci -q set dhcp.@dnsmasq[0].port='0'
+	uci -q delete dhcp.@dnsmasq[0].server
+	uci -q add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+	uci -q add_list dhcp.@dnsmasq[0].server='119.29.29.29'
+	uci -q commit dhcp
+fi
+
+if [ -f /etc/config/firewall ]; then
+	uci -q set firewall.@zone[0].input='ACCEPT'
+	uci -q set firewall.@zone[0].output='ACCEPT'
+	uci -q set firewall.@zone[0].forward='ACCEPT'
+	uci -q set firewall.@defaults[0].flow_offloading='1'
+	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+	uci -q set firewall.@defaults[0].fullcone='0'
+	uci -q set firewall.@defaults[0].fullcone6='0'
+	uci -q commit firewall
+fi
+
+sed -i '/^net.ipv4.ip_forward=/d' /etc/sysctl.conf 2>/dev/null || true
+printf '%s\n' 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+sysctl -p >/dev/null 2>&1 || true
+
+if [ -f /etc/config/system ]; then
+	uci -q set system.@system[0].zonename='Asia/Shanghai'
+	uci -q set system.@system[0].timezone='CST-8'
+	uci -q set system.ntp='timeserver'
+	uci -q set system.ntp.enabled='1'
+	uci -q set system.ntp.enable_server='0'
+	uci -q delete system.ntp.server
+	uci -q add_list system.ntp.server='ntp.aliyun.com'
+	uci -q add_list system.ntp.server='ntp.tencent.com'
+	uci -q add_list system.ntp.server='cn.pool.ntp.org'
+	uci -q commit system
+fi
+
+# luci-app-amlogic (晶晨宝盒): OTA source + board settings. ophub's `remake` packaging
+# step unconditionally overlays its own /etc/config/amlogic (repo -> ophub official,
+# btrfs, schedutil) on top of our rootfs (remake line ~914, `cp -af common-files/.`),
+# so a static files/etc/config/amlogic never survives into the image. Re-assert our
+# values here at first boot — which runs *after* that packaging overlay — so they win.
+# NOTE: amlogic_firmware_repo must be a PUBLIC repo. amlogic_check_firmware.sh fetches
+# the releases HTML anonymously with bare curl (no token support), so a private repo
+# 404s and OTA never sees an update.
+if [ -f /etc/config/amlogic ]; then
+	uci -q set amlogic.config=amlogic
+	uci -q set amlogic.config.enable='1'
+	uci -q set amlogic.config.amlogic_firmware_repo='https://github.com/mrabit/N1-OpenWrt'
+	uci -q set amlogic.config.amlogic_firmware_tag='OpenWrt'
+	uci -q set amlogic.config.amlogic_firmware_suffix='.img.gz'
+	uci -q set amlogic.config.amlogic_kernel_path='https://github.com/ophub/kernel'
+	uci -q set amlogic.config.amlogic_kernel_tags='kernel_stable'
+	uci -q set amlogic.config.amlogic_kernel_branch='6.12'
+	uci -q set amlogic.config.amlogic_firmware_config='1'
+	uci -q set amlogic.config.amlogic_write_bootloader='1'
+	uci -q set amlogic.config.amlogic_shared_fstype='ext4'
+	uci -q set amlogic.armcpu=settings
+	uci -q set amlogic.armcpu.governor0='performance'
+	uci -q set amlogic.armcpu.minfreq0='1512000'
+	uci -q set amlogic.armcpu.maxfreq0='1512000'
+	uci -q commit amlogic
+fi
+
+# PassWall: default config + baked-in node + shunt settings (runbook §5). The node
+# (socks://192.168.0.8:1180) is per-deployment data baked in by request.
+if [ -f /usr/share/passwall/0_default_config ] && [ ! -s /etc/config/passwall ]; then
+	cp -f /usr/share/passwall/0_default_config /etc/config/passwall
+fi
+if [ -f /etc/config/passwall ]; then
+	uci -q set passwall.node8socks=nodes
+	uci -q set passwall.node8socks.type='Socks'
+	uci -q set passwall.node8socks.remarks='Macmini'
+	uci -q set passwall.node8socks.address='192.168.0.8'
+	uci -q set passwall.node8socks.port='1180'
+	uci -q set passwall.@global[0].enabled='1'
+	uci -q set passwall.@global[0].tcp_node='node8socks'
+	uci -q set passwall.@global[0].udp_node='node8socks'
+	uci -q set passwall.@global[0].dns_redirect='0'
+	uci -q set passwall.@global[0].dns_shunt='chinadns-ng'
+	uci -q set passwall.@global[0].dns_mode='tcp'
+	uci -q set passwall.@global[0].use_default_dns='direct'
+	uci -q set passwall.@global[0].china_dns='223.5.5.5:53'
+	uci -q set passwall.@global[0].localhost_proxy='1'
+	uci -q set passwall.@global[0].use_ipv6='0'
+	uci -q set passwall.@global[0].filter_proxy_ipv6='1'
+	uci -q set passwall.@global_forwarding[0].ipv6_tproxy='0'
+	uci -q set passwall.@global_forwarding[0].accept_icmpv6='0'
+	uci -q set passwall.@global_forwarding[0].tcp_proxy_mode='proxy'
+	uci -q set passwall.@global_forwarding[0].udp_proxy_mode='proxy'
+	uci -q set passwall.@global_forwarding[0].udp_proxy_drop_ports='443'
+	uci -q set passwall.@global_forwarding[0].udp_redir_ports='1:65535'
+	uci -q set passwall.@global_forwarding[0].tcp_redir_ports='22,25,53,80,143,443,465,587,853,873,993,995,5222,8080,8443,9418'
+	uci -q commit passwall
+fi
+
+# AdGuardHome: enable + point at the baked-in yaml (upstream -> chinadns-ng:15353,
+# filters/rewrites baked in by request; schema_version must match the built AGH).
+if [ -f /etc/config/adguardhome ]; then
+	uci -q set adguardhome.config.enabled='1'
+	uci -q commit adguardhome
+	chown -R adguardhome:adguardhome /etc/adguardhome 2>/dev/null || true
+fi
+
+# SNMP: restrict read-only community to the LAN (default 'default' is world-readable).
+if [ -f /etc/config/snmpd ]; then
+	uci -q set snmpd.public.source='192.168.0.0/24'
+	uci -q commit snmpd
+fi
+
+# KMS (vlmcsd): enable the activation server. auto_activate stays 0 — dnsmasq is off,
+# enabling it would write a config into /tmp/dnsmasq.d for a stopped daemon.
+if [ -f /etc/config/vlmcsd ]; then
+	uci -q set vlmcsd.config.enabled='1'
+	uci -q commit vlmcsd
+fi
+
+# dnsmasq: stop + disable. Bypass mode hands :53 to AdGuardHome; port=0 (above) also
+# keeps it from re-binding :53 if PassWall pulls it back up.
+if [ -x /etc/init.d/dnsmasq ]; then
+	/etc/init.d/dnsmasq stop >/dev/null 2>&1 || true
+	/etc/init.d/dnsmasq disable >/dev/null 2>&1 || true
+fi
+
+service_enable_if_present firewall
+service_enable_if_present sysntpd
+service_enable_if_present snmpd
+service_enable_if_present vlmcsd
+service_enable_if_present passwall
+service_enable_if_present adguardhome
+
+# restart order matters: passwall (chinadns-ng:15353) must be up before adguardhome
+# (whose upstream points at 15353).
+service_restart_if_present firewall
+service_restart_if_present sysntpd
+service_restart_if_present snmpd
+service_restart_if_present vlmcsd
+service_restart_if_present passwall
+service_restart_if_present adguardhome
+
+exit 0

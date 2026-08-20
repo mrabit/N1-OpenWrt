@@ -1,0 +1,13 @@
+# Build artifacts (only present if ARTIFACT_DIR is pointed back into the repo;
+# bin/build.sh defaults it to BUILD_ROOT/output on the native volume)
+/output/
+
+# Packaged firmware images: bin/build.sh moves the ophub *.img.gz here.
+/dist/
+
+# Local Claude Code session/config data
+/.claude/
+
+# Local planning/scratch docs
+/docs/
+.DS_Store

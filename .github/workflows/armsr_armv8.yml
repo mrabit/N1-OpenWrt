@@ -12,7 +12,11 @@ on:
           - true
           - false
   schedule:
-    - cron: "0 0 1,16 * *"
+    - cron: "17 18 1,16 * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -23,19 +27,35 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 240
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v7.0.1
+
+    - name: Free up disk space
+      uses: jlumbroso/free-disk-space@v1.3.1
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
 
     - name: Initialize environment
+      timeout-minutes: 45
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update > /dev/null
-        sudo -E apt-get -qq install -y $(curl -fsSL https://raw.githubusercontent.com/nantayo/My-Pkg/master/openwrt) > /dev/null
-        sudo -E apt-get -qq autoremove --purge > /dev/null
-        sudo -E apt-get -qq clean > /dev/null
+        set -euxo pipefail
+        echo "=== apt-get update ==="
+        sudo -E apt-get update
+        echo "=== install packages ==="
+        sudo -E "$GITHUB_WORKSPACE/bin/build-deps.sh"
+        sudo -E apt-get autoremove --purge -y
+        sudo -E apt-get clean
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
@@ -49,20 +69,47 @@ jobs:
 
     - name: Update & Install feeds
       run: |
+        set -euo pipefail
         chmod +x armsr/armv8/diy/diy.sh
         cd openwrt
-        ./scripts/feeds update -a
+        update_feeds() {
+          for attempt in 1 2 3; do
+            ./scripts/feeds update -a && return 0
+            echo "Feed update failed (attempt $attempt/3), retrying..." >&2
+            sleep $((attempt * 5))
+          done
+          echo "Feed update failed after 3 attempts." >&2
+          return 1
+        }
+        update_feeds
         $GITHUB_WORKSPACE/armsr/armv8/diy/diy.sh
-        ./scripts/feeds update -a
+        update_feeds
         ./scripts/feeds install -a
 
     - name: Load N1 custom config
       run: |
         rm -rf openwrt/files openwrt/.config
         mv armsr/armv8/N1/files armsr/armv8/N1/.config openwrt/
+        echo "CONFIG_CCACHE=y" >> openwrt/.config
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: /workdir/openwrt/.ccache
+        key: ccache-${{ env.REPO_BRANCH }}-${{ env.FILE_DATE }}
+        restore-keys: |
+          ccache-${{ env.REPO_BRANCH }}-
+
+    - name: Cache downloads
+      uses: actions/cache@v4
+      with:
+        path: /workdir/openwrt/dl
+        key: dl-${{ env.REPO_BRANCH }}-${{ env.FILE_DATE }}
+        restore-keys: |
+          dl-${{ env.REPO_BRANCH }}-
 
     - name: SSH connect to Actions
-      uses: P3TERX/ssh2actions@main
+      uses: P3TERX/ssh2actions@v1.0.0
       if: github.event.inputs.ssh == 'true'
 
     - name: Download package
@@ -73,6 +120,8 @@ jobs:
         find dl -size -1k -exec rm -f {} \;
 
     - name: Compile N1 firmware
+      env:
+        CCACHE_MAXSIZE: 2G
       run: |
         chmod -R 755 openwrt
         cd openwrt
@@ -88,22 +137,31 @@ jobs:
         kernel_usage: flippy
         openwrt_kernel: 6.12.y
         openwrt_size: 256/1024
-        builder_name: nantayo
+        builder_name: mrabit
 
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
+    - name: Upload firmware to dated release (archive)
+      uses: softprops/action-gh-release@v3.0.2
       with:
         tag_name: OpenWrt_${{ env.FILE_DATE }}
         files: ${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz
         body: |
           首次使用建议全新刷写
           * 基本信息
-          IP: 192.168.2.2
+          IP: 192.168.0.4
           账户: root
           密码: password
 
-    - name: Delete old releases
-      uses: mgz0227/delete-older-releases@master
+    - name: Update rolling release (OTA latest)
+      uses: softprops/action-gh-release@v3.0.2
       with:
-        keep_latest: 2
-        delete_tags : true
+        # luci-app-amlogic OTA pulls from this fixed tag (see files/etc/config/amlogic).
+        # Reuses the same *.img.gz assets; this release is overwritten every build.
+        tag_name: OpenWrt
+        files: ${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz
+        body: |
+          滚动更新的最新固件（luci-app-amlogic 在线升级源），构建于 ${{ env.FILE_DATE }}。
+          历史版本见 OpenWrt_<日期> 标签。
+          * 基本信息
+          IP: 192.168.0.4
+          账户: root
+          密码: password

@@ -1,0 +1,53 @@
+# AdGuardHome baked-in config (runbook §6). schema_version must match the built AGH
+# (currently 0.107.76 -> schema 34); AGH auto-migrates if it later bumps.
+http:
+  address: 0.0.0.0:3000
+language: zh-cn
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+  upstream_dns:
+    - 127.0.0.1:15353
+  bootstrap_dns:
+    - 223.5.5.5
+    - 119.29.29.29
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+    name: AdGuard DNS filter
+    id: 1
+  - enabled: true
+    url: https://adaway.org/hosts.txt
+    name: AdAway
+    id: 2
+  - enabled: true
+    url: https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+    name: Steven Black hosts
+    id: 4
+  - enabled: true
+    url: https://anti-ad.net/easylist.txt
+    name: anti-ad easylist
+    id: 5
+  - enabled: true
+    url: https://raw.githubusercontent.com/afwfv/DD-AD/refs/heads/release/dns.txt
+    name: DD-AD dns
+    id: 6
+user_rules:
+  - '@@||affiliates.*.com^$important'
+  # 按需为受信任客户端放行（示例）
+  - '@@||*^$client=192.168.1.10'
+  - '||istatmenus.app^'
+  - '||bjango.com^'
+  - '||checkout.paddle.com^'
+filtering:
+  # DNS 重写示例：将内部/自建服务域名指向局域网 IP。
+  # 按实际部署替换 domain 与 answer，可增删条目。
+  rewrites:
+    - domain: service.example.com
+      answer: 192.168.1.2
+      enabled: true
+    - domain: nas.example.com
+      answer: 192.168.1.3
+      enabled: true
+schema_version: 34
