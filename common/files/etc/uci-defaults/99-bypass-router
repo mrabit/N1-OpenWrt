@@ -65,16 +65,11 @@ sed -i '/^net.ipv4.ip_forward=/d' /etc/sysctl.conf 2>/dev/null || true
 printf '%s\n' 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 sysctl -p >/dev/null 2>&1 || true
 
+# NTP 服务器不在此设: 会被 ImmortalWrt 的 99-default-settings-chinese
+# (排在本脚本之后) 覆盖成它的 CN 列表。详见 CLAUDE.md。
 if [ -f /etc/config/system ]; then
 	uci -q set system.@system[0].zonename='Asia/Shanghai'
 	uci -q set system.@system[0].timezone='CST-8'
-	uci -q set system.ntp='timeserver'
-	uci -q set system.ntp.enabled='1'
-	uci -q set system.ntp.enable_server='0'
-	uci -q delete system.ntp.server
-	uci -q add_list system.ntp.server='ntp.aliyun.com'
-	uci -q add_list system.ntp.server='ntp.tencent.com'
-	uci -q add_list system.ntp.server='cn.pool.ntp.org'
 	uci -q commit system
 fi
 
