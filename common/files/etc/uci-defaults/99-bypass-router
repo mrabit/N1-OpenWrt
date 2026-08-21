@@ -54,6 +54,10 @@ if [ -f /etc/config/firewall ]; then
 	uci -q set firewall.@zone[0].input='ACCEPT'
 	uci -q set firewall.@zone[0].output='ACCEPT'
 	uci -q set firewall.@zone[0].forward='ACCEPT'
+	# 单臂旁路由：本机无 wan 口，直连（不走代理）的流量从 br-lan 转发回主路由时
+	# 默认不做 SNAT，回程非对称、部分主路由直接丢包 → 国内 IPv4 直连站点收不到回包。
+	# lan zone 开 masq 让直连流量经 N1 做 SNAT，回程对称经过本机。
+	uci -q set firewall.@zone[0].masq='1'
 	uci -q set firewall.@defaults[0].flow_offloading='1'
 	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 	uci -q set firewall.@defaults[0].fullcone='0'
