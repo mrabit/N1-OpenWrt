@@ -138,9 +138,15 @@ for src in "$OPHUB_DIR"/openwrt/out/*.img.gz; do
     imgdate="$(echo "$base" | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}' | head -1 || true)"
     [ -z "$imgdate" ] && imgdate="$(date +%Y.%m.%d)"
     newname="immortalwrt_${op_version}_${bk}_${imgdate}.img.gz"
-    # out/ images are root-owned (remake ran as root); move + reclaim ownership.
-    sudo mv "$src" "$imgdest/$newname"
-    sudo chown "$(id -u):$(id -g)" "$imgdest/$newname"
+    # Recompress instead of mv: ophub's gzip stored the pre-rename name in the
+    # FNAME header, so `gunzip -N`/GUI tools would decompress our renamed .gz to
+    # the stale name. `gzip -n` writes no name/mtime, so extraction falls back to
+    # stripping .gz and matches the shell (mirrors the workflow's Collect step).
+    # src is root-owned (remake ran as root); sudo gzip -dc reads it, the pipe
+    # writes the dist/ file as the build user. Drop the root-owned src after.
+    # gzip -dc (not zcat: BSD zcat only groks .Z) for portability.
+    sudo gzip -dc "$src" | gzip -n > "$imgdest/$newname"
+    sudo rm -f "$src"
 done
 echo "Packaged firmware in $imgdest:"
 ls -1 "$imgdest"/*.img.gz

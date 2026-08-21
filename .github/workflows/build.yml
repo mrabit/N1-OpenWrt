@@ -132,8 +132,12 @@ jobs:
     - name: Load custom config
       run: |
         rm -rf openwrt/files openwrt/.config
-        # Shared overlay + profile config + shared service stack.
+        # Shared overlay, then per-profile overlay (armsr/armv8/N1/files layers on
+        # top of common/files — e.g. N1-only /etc/config/wireless), then profile
+        # config + shared service stack. Mirrors bin/build-*.sh's PROFILE_DIR/files.
         cp -r common/files openwrt/files
+        profile_files="$(dirname "${{ matrix.config }}")/files"
+        [ -d "$profile_files" ] && cp -rf "$profile_files/." openwrt/files/
         cp ${{ matrix.config }} openwrt/.config
         cat common/config.services >> openwrt/.config
         echo "CONFIG_CCACHE=y" >> openwrt/.config
@@ -217,7 +221,13 @@ jobs:
           fi
           opdate="$(echo "$base" | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}' | head -1 || true)"
           [ -n "$opdate" ] && imgdate="$opdate"
-          cp -v "$src" "$out/immortalwrt_${OP_VERSION}_${bk}_${imgdate}.img.gz"
+          # Recompress instead of cp: ophub's gzip stored the pre-rename name
+          # (openwrt_amlogic_...) in the FNAME header, so `gunzip -N`/GUI tools
+          # would decompress our renamed .gz to the stale name. `gzip -n` writes
+          # no name/mtime, so extraction falls back to stripping .gz and matches
+          # the shell (same as x86, which stores no FNAME). gzip -dc (not zcat:
+          # BSD zcat only groks .Z) for portability.
+          gzip -dc "$src" | gzip -n > "$out/immortalwrt_${OP_VERSION}_${bk}_${imgdate}.img.gz"
         else
           # x86 emits a bootable combined image directly — publish only the
           # squashfs combined-efi (sysupgrade-friendly, read-only root + overlay).
@@ -278,9 +288,30 @@ jobs:
         opver="$(basename "${anyimg:-}" | cut -d_ -f2)"
         [ -n "$opver" ] || opver="${REPO_BRANCH#openwrt-}"
         echo "OP_VERSION=$opver" >> $GITHUB_ENV
-        # N1 images (ophub) match the amlogic naming; x86 the immortalwrt one.
+        # N1 images (unified name) match the amlogic OTA regex; x86 don't. Split
+        # them out by the _s905d_ segment for the fixed OpenWrt (OTA) tag.
         mkdir -p n1-only
         find dist -name '*_s905d_*.img.gz' -exec cp -v {} n1-only/ \; || true
+
+    - name: Reset releases (fresh publish date, drop stale-named assets)
+      # softprops updates an existing release via API PATCH: it uploads the new
+      # files but never refreshes published_at (GitHub only stamps it on first
+      # publish) and never removes assets it didn't upload. So on rolling tags
+      # the date freezes at first creation and old-named images pile up. Deleting
+      # the release object first (keeping the git tag) makes softprops recreate
+      # it below → fresh published_at + a clean asset list.
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        for tag in "firmware_${FILE_DATE}" latest; do
+          gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+        done
+        # OpenWrt (N1 OTA) only when we actually have an N1 image to republish;
+        # an x86-only run must not wipe the OTA source without replacing it.
+        if ls n1-only/*.img.gz >/dev/null 2>&1; then
+          gh release delete OpenWrt --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+        fi
 
     - name: Publish combined dated release
       uses: softprops/action-gh-release@v3.0.2

@@ -4,9 +4,19 @@ config interface 'loopback'
 	option ipaddr '127.0.0.1'
 	option netmask '255.0.0.0'
 
+# lan 做成 bridge (br-lan 含 eth0), 这样 AP 模式的 wifi-iface 指到 network 'lan'
+# 就能桥进同一 L2, wifi 设备和有线设备同处 192.168.0.0/24、从主路由拿 IP。
+# N1 的开放 AP 无线配置见 armsr/armv8/N1/files/etc/config/wireless (仅 N1 层)。
+# 此文件纯拓扑、不含 SSID/密码。br-lan 只挂 eth0 时行为与直连 eth0 一致,
+# 也是 OpenWrt 默认的 lan 形态, 对纯有线/x86 无副作用。
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'eth0'
+
 config interface 'lan'
 	option proto 'static'
-	option device 'eth0'
+	option device 'br-lan'
 	option ipaddr '192.168.0.4/24'
 	option gateway '192.168.0.1'
 	option multipath 'off'
