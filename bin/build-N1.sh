@@ -226,7 +226,9 @@ fi
 # step lives in bin/package.sh so it can also be run standalone against a prior
 # build; the script re-resolves BUILD_ROOT/ALL_PROXY/OPHUB_REPO from the env and
 # works off the tree at $OUTDIR/openwrt, which is the cwd-independent absolute path.
-"$SCRIPT_DIR/package.sh"
+# Pass REPO_BRANCH explicitly so the op version in the image name (derived from it)
+# always matches the branch this build actually compiled.
+REPO_BRANCH="$REPO_BRANCH" "$SCRIPT_DIR/package.sh"
 
 # Total wall-clock time. SECONDS is a bash builtin counting since the script
 # started, so it spans clone + feeds + compile + packaging.

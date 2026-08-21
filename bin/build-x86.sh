@@ -5,7 +5,8 @@
 # Clones ImmortalWrt, runs the shared diy.sh, applies the shared overlay + x86
 # config (+ common/config.services) and compiles. Unlike N1 there is NO ophub
 # repackaging: OpenWrt's x86 target already emits a bootable
-# *-generic-squashfs-combined-efi.img.gz, which is published directly.
+# *-generic-squashfs-combined-efi.img.gz, which is published after renaming to
+# the unified scheme shared with N1 (immortalwrt_<op>_x86_64_k<kernel>_<date>).
 #
 # The openwrt tree and all caches live under BUILD_ROOT, which MUST be on a native
 # ext4/xfs/btrfs volume (OpenWrt's parallel small-file writes corrupt on virtiofs).
@@ -191,10 +192,34 @@ if [ -d bin/targets ]; then
     # standard router choice, so it's the one that ships.
     imgdest="$REPO_ROOT/dist"
     mkdir -p "$imgdest"
-    if find "$dest" -name '*squashfs-combined-efi.img.gz' -print -quit | grep -q .; then
-        find "$dest" -name '*squashfs-combined-efi.img.gz' -exec cp -f {} "$imgdest/" \;
-        echo "Flashable EFI image(s) copied to $imgdest:"
-        ls -1 "$imgdest"/*squashfs-combined-efi.img.gz
+    src="$(find "$dest" -name '*squashfs-combined-efi.img.gz' -print -quit)"
+    if [ -n "$src" ]; then
+        # Rename to the unified scheme shared with N1:
+        #   immortalwrt_<op>_x86_64_k<kernel>_<date>.img.gz
+        # The kernel version comes from the target manifest (e.g. 6.12.103); the
+        # date is generated locally (TZ from the environment). x86 has no OTA
+        # naming constraint, so this is purely cosmetic alignment with N1. The op
+        # version is read from the built tree's include/version.mk (VERSION_NUMBER,
+        # e.g. 25.12-SNAPSHOT) with -SNAPSHOT stripped -> 25.12; once upstream tags
+        # a real patch level (25.12.1) it flows through. Falls back to REPO_BRANCH
+        # (openwrt-25.12 -> 25.12) if the tree/line can't be read.
+        op_version="$(sed -n 's/^VERSION_NUMBER:=$(if.*,\(.*\))$/\1/p' \
+            "$OUTDIR/openwrt/include/version.mk" 2>/dev/null | head -1)"
+        op_version="${op_version%-SNAPSHOT}"
+        [ -n "$op_version" ] || op_version="${REPO_BRANCH#openwrt-}"
+        kver="$(grep -E '^kernel ' "$dest"/x86/64/*.manifest 2>/dev/null \
+            | awk '{print $3}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+        if [ -z "$kver" ]; then
+            echo "ERROR: could not parse kernel from $dest/x86/64/*.manifest — the" >&2
+            echo "       naming scheme requires it. Manifest kernel line:" >&2
+            grep -E '^kernel ' "$dest"/x86/64/*.manifest >&2 || echo "  (no ^kernel line)" >&2
+            exit 1
+        fi
+        imgdate="$(date +%Y.%m.%d)"
+        newname="immortalwrt_${op_version}_x86_64_k${kver}_${imgdate}.img.gz"
+        cp -f "$src" "$imgdest/$newname"
+        echo "Flashable EFI image copied to $imgdest:"
+        ls -1 "$imgdest/$newname"
     else
         echo "WARN: no *squashfs-combined-efi.img.gz found under $dest — check the" >&2
         echo "      x86 .config GRUB/rootfs symbols (make defconfig may have flipped" >&2

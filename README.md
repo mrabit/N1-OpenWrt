@@ -3,7 +3,7 @@
 本固件定位**轻量旁路由**，不含 PPPoE、WiFi 相关功能。预置了旁路由常用服务集，但代理节点/订阅、服务配置等私有数据仍留给刷机后自行配置。目前提供两种构建目标（profile）：
 
 - **N1**（`armsr/armv8/N1`）：斐讯 N1（Amlogic S905D），经 ophub/flippy 打包为可刷写的 `*.img.gz`，含 [luci-app-amlogic](https://github.com/ophub/luci-app-amlogic)（晶晨宝盒）在线升级。
-- **x86**（`x86/64`）：x86/64 通用机型（软路由/虚拟机），OpenWrt 直接产出可 UEFI 引导的 `*-generic-squashfs-combined-efi.img.gz`，无需二次打包，也不含 luci-app-amlogic。
+- **x86**（`x86/64`）：x86/64 通用机型（软路由/虚拟机），OpenWrt 直接产出可 UEFI 引导的 combined-efi 镜像，无需 ophub 二次打包，也不含 luci-app-amlogic。
 
 两种 profile 共享同一套旁路由服务与 overlay（见 `common/`），只有 target/rootfs/打包流程不同。
 
@@ -33,7 +33,14 @@ LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `common/
 
 脚本会克隆 ImmortalWrt、跑对应的 `diy.sh`、铺上共享 overlay + profile 的 config 并编译。N1 产物在编译后经 ophub 打包为 `*.img.gz`；x86 直接产出可引导的 `*-generic-squashfs-combined-efi.img.gz`。
 
-**最终可刷写镜像**（两个 profile 都）落到仓库根的 `dist/`（已 git-ignore）：N1 由 `package.sh` 移入，x86 的 combined-efi 由 `build-x86.sh` 拷入。完整的中间产物（整个 `bin/targets`）另外输出到原生盘：
+**最终可刷写镜像**（两个 profile 都）落到仓库根的 `dist/`（已 git-ignore）：N1 由 `package.sh` 移入，x86 的 combined-efi 由 `build-x86.sh` 拷入。两者都会重命名为统一格式 `immortalwrt_<op版本>_<平台>_k<内核号>_<日期>.img.gz`（op 版本从构建产物 `include/version.mk` 的 `VERSION_NUMBER` 读取并剥离 `-SNAPSHOT`，如 `25.12-SNAPSHOT` → `25.12`；上游打出正式补丁号 `25.12.1` 时自动跟随）：
+
+```
+N1:  immortalwrt_25.12_s905d_k6.12.48_2026.08.21.img.gz
+x86: immortalwrt_25.12_x86_64_k6.12.103_2026.08.21.img.gz
+```
+
+N1 保留 `s905d_k6.12.NN` 段供晶晨宝盒 OTA 识别（内核为 ophub/flippy 版），x86 内核号取自编译产物 `.manifest`（ImmortalWrt 官方编译），两者内核不同源。完整的中间产物（整个 `bin/targets`）另外输出到原生盘：
 
 ```bash
 /opt/openwrt-build/output/bin/targets/armsr/armv8/   # N1 中间产物
@@ -67,5 +74,5 @@ JOBS=4 ./bin/build.sh                             # 限并发
 
 # 致谢
 
-本项目基于 [ImmortalWrt-25.12](https://github.com/immortalwrt/immortalwrt/tree/openwrt-25.12) 源码编译，使用 ophub 的[脚本](https://github.com/ophub/amlogic-s9xxx-openwrt)和 flippy 的[内核](https://github.com/ophub/kernel/releases/tag/kernel_flippy)打包成完整固件，感谢开发者们的无私分享。<br>
-flippy 固件的更多细节参考[恩山论坛帖子](https://www.right.com.cn/forum/thread-4076037-1-1.html)。
+本项目基于 [ImmortalWrt-25.12](https://github.com/immortalwrt/immortalwrt/tree/openwrt-25.12) 源码编译。N1 使用 ophub 的[脚本](https://github.com/ophub/amlogic-s9xxx-openwrt)和 flippy 的[内核](https://github.com/ophub/kernel/releases/tag/kernel_flippy)打包为可刷写固件；x86 由 OpenWrt 官方直接产出 EFI 镜像。感谢开发者们的无私分享。<br>
+flippy 固件（N1）的更多细节参考[恩山论坛帖子](https://www.right.com.cn/forum/thread-4076037-1-1.html)。

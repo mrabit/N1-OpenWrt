@@ -18,6 +18,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Outbound proxy for ophub kernel fetches.
 : "${ALL_PROXY:=socks5h://192.168.0.8:1180}"
 : "${OPHUB_REPO:=https://github.com/ophub/amlogic-s9xxx-openwrt}"
+# Source branch; the op version in the image name is derived from it
+# (openwrt-25.12 -> 25.12). Inherited from build-N1.sh when called by it.
+: "${REPO_BRANCH:=openwrt-25.12}"
 
 OUTDIR="$BUILD_ROOT/build"
 OPHUB_DIR="$BUILD_ROOT/ophub"
@@ -104,10 +107,40 @@ cp "$rootfs" "$OPHUB_DIR/openwrt-armsr/"
     ./remake -b s905d -k 6.12.y -r ophub/kernel -u flippy -s 256/1024 -n mrabit )
 
 # remake ran as root, so its out/ images are root-owned; move them to the
-# repo's dist/ dir and reclaim ownership.
+# repo's dist/ dir, renaming to the unified scheme shared with x86:
+#   immortalwrt_<op>_<board>_k<kernel>_<date>.img.gz
+# The `s905d_k6.12.NN` segment is preserved verbatim from ophub's name because
+# luci-app-amlogic OTA matches on `.*_s905d_.*k6.12.[0-9]+.*.img.gz` — renaming
+# is safe as long as that segment and the .img.gz suffix survive. The date is
+# reused from ophub's name (its packaging date) to stay consistent.
+#
+# Iterate ophub's out/ (N1 images only), NOT the whole dist/: dist/ may already
+# hold an x86 image from a prior build, and the s905d parse below would fail on
+# it and abort. Moving straight from out/ touches only what this run produced.
 imgdest="$REPO_ROOT/dist"
 mkdir -p "$imgdest"
-sudo mv "$OPHUB_DIR"/openwrt/out/*.img.gz "$imgdest/"
-sudo chown "$(id -u):$(id -g)" "$imgdest"/*.img.gz
-echo "Packaged firmware moved to $imgdest"
+# op version is read from the built tree's include/version.mk (VERSION_NUMBER,
+# e.g. 25.12-SNAPSHOT) with -SNAPSHOT stripped -> 25.12; once upstream tags a
+# real patch level (25.12.1) it flows through. Falls back to REPO_BRANCH
+# (openwrt-25.12 -> 25.12) if the tree/line can't be read.
+op_version="$(sed -n 's/^VERSION_NUMBER:=$(if.*,\(.*\))$/\1/p' \
+    "$OUTDIR/openwrt/include/version.mk" 2>/dev/null | head -1)"
+op_version="${op_version%-SNAPSHOT}"
+[ -n "$op_version" ] || op_version="${REPO_BRANCH#openwrt-}"
+for src in "$OPHUB_DIR"/openwrt/out/*.img.gz; do
+    base="$(basename "$src")"
+    bk="$(echo "$base" | grep -oE 's905d_k[0-9]+\.[0-9]+\.[0-9]+' || true)"
+    if [ -z "$bk" ]; then
+        echo "ERROR: could not parse s905d_k<kernel> from ophub name '$base' —" >&2
+        echo "       OTA needs it and the naming scheme requires it." >&2
+        exit 1
+    fi
+    imgdate="$(echo "$base" | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}' | head -1 || true)"
+    [ -z "$imgdate" ] && imgdate="$(date +%Y.%m.%d)"
+    newname="immortalwrt_${op_version}_${bk}_${imgdate}.img.gz"
+    # out/ images are root-owned (remake ran as root); move + reclaim ownership.
+    sudo mv "$src" "$imgdest/$newname"
+    sudo chown "$(id -u):$(id -g)" "$imgdest/$newname"
+done
+echo "Packaged firmware in $imgdest:"
 ls -1 "$imgdest"/*.img.gz

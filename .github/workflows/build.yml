@@ -188,19 +188,55 @@ jobs:
     - name: Collect firmware
       run: |
         set -euo pipefail
-        mkdir -p "out/${{ matrix.profile }}"
+        out="out/${{ matrix.profile }}"
+        mkdir -p "$out"
+        # Unified naming shared by both profiles:
+        #   N1:  immortalwrt_<op>_s905d_k<kernel>_<date>.img.gz
+        #   x86: immortalwrt_<op>_x86_64_k<kernel>_<date>.img.gz
+        # N1 keeps the `s905d_k6.12.NN` segment so luci-app-amlogic OTA
+        # (regex .*_s905d_.*k6.12.[0-9]+.*.img.gz) still matches it.
+        # op version is read from the built tree's include/version.mk
+        # (VERSION_NUMBER, e.g. 25.12-SNAPSHOT), with -SNAPSHOT stripped -> 25.12.
+        # Once upstream tags a real patch level on this line (25.12.1), that flows
+        # through automatically. Falls back to REPO_BRANCH (openwrt-25.12 -> 25.12)
+        # if the tree/line can't be read.
+        OP_VERSION="$(sed -n 's/^VERSION_NUMBER:=$(if.*,\(.*\))$/\1/p' \
+          openwrt/include/version.mk 2>/dev/null | head -1)"
+        OP_VERSION="${OP_VERSION%-SNAPSHOT}"
+        [ -n "$OP_VERSION" ] || OP_VERSION="${REPO_BRANCH#openwrt-}"
+        imgdate="$(TZ="$TZ" date +%Y.%m.%d)"
         if [ "${{ matrix.profile }}" = "N1" ]; then
           # ophub exports PACKAGED_OUTPUTPATH with the flashable *.img.gz.
-          cp -v "$PACKAGED_OUTPUTPATH"/*.img.gz "out/${{ matrix.profile }}/"
+          src="$(ls "$PACKAGED_OUTPUTPATH"/*.img.gz | head -1)"
+          base="$(basename "$src")"
+          bk="$(echo "$base" | grep -oE 's905d_k[0-9]+\.[0-9]+\.[0-9]+' || true)"
+          if [ -z "$bk" ]; then
+            echo "ERROR: could not parse s905d_k<kernel> from ophub name '$base' —" >&2
+            echo "       OTA needs it and the naming scheme requires it." >&2
+            exit 1
+          fi
+          opdate="$(echo "$base" | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}' | head -1 || true)"
+          [ -n "$opdate" ] && imgdate="$opdate"
+          cp -v "$src" "$out/immortalwrt_${OP_VERSION}_${bk}_${imgdate}.img.gz"
         else
           # x86 emits a bootable combined image directly — publish only the
           # squashfs combined-efi (sysupgrade-friendly, read-only root + overlay).
           outdir="openwrt/bin/targets/x86/64"
-          cp -v "$outdir"/*squashfs-combined-efi.img.gz "out/${{ matrix.profile }}/" || {
+          src="$(ls "$outdir"/*squashfs-combined-efi.img.gz 2>/dev/null | head -1)" || true
+          if [ -z "${src:-}" ]; then
             echo "No squashfs-combined-efi image found in $outdir; contents:" >&2
             ls -la "$outdir" >&2
             exit 1
-          }
+          fi
+          kver="$(grep -E '^kernel ' "$outdir"/*.manifest 2>/dev/null \
+            | awk '{print $3}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+          if [ -z "$kver" ]; then
+            echo "ERROR: could not parse kernel from $outdir/*.manifest — the" >&2
+            echo "       naming scheme requires it. Manifest kernel line:" >&2
+            grep -E '^kernel ' "$outdir"/*.manifest >&2 || echo "  (no ^kernel line)" >&2
+            exit 1
+          fi
+          cp -v "$src" "$out/immortalwrt_${OP_VERSION}_x86_64_k${kver}_${imgdate}.img.gz"
         fi
 
     - name: Upload profile artifact
@@ -215,8 +251,12 @@ jobs:
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
-    - name: Set date
-      run: echo "FILE_DATE=$(TZ=$TZ date +"%Y%m%d")" >> $GITHUB_ENV
+    - name: Set date and version
+      run: |
+        echo "FILE_DATE=$(TZ=$TZ date +"%Y%m%d")" >> $GITHUB_ENV
+        # OP_VERSION is derived after download, from the image filenames
+        # themselves (see "List collected images") — the images are the single
+        # source of truth, so the release notes always match what was built.
 
     - name: Download all firmware artifacts
       uses: actions/download-artifact@v4
@@ -230,6 +270,14 @@ jobs:
         set -euo pipefail
         echo "Collected images:"
         find dist -name '*.img.gz' -printf '  %p (%s bytes)\n'
+        # Derive OP_VERSION from an image name (immortalwrt_<op>_<board>_...),
+        # 2nd underscore field — the build stage already baked the real version
+        # in there, so the notes match the images exactly. Fall back to the
+        # branch-derived value if no image is present (shouldn't happen).
+        anyimg="$(find dist -name '*.img.gz' | head -1)"
+        opver="$(basename "${anyimg:-}" | cut -d_ -f2)"
+        [ -n "$opver" ] || opver="${REPO_BRANCH#openwrt-}"
+        echo "OP_VERSION=$opver" >> $GITHUB_ENV
         # N1 images (ophub) match the amlogic naming; x86 the immortalwrt one.
         mkdir -p n1-only
         find dist -name '*_s905d_*.img.gz' -exec cp -v {} n1-only/ \; || true
@@ -241,8 +289,8 @@ jobs:
         files: dist/*.img.gz
         body: |
           N1 (Amlogic S905D) + x86/64 EFI 固件，构建于 ${{ env.FILE_DATE }}。
-          * N1: openwrt_amlogic_s905d_*.img.gz —— 晶晨宝盒可在线升级
-          * x86: immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz —— UEFI 引导
+          * N1: immortalwrt_${{ env.OP_VERSION }}_s905d_k*.img.gz —— 晶晨宝盒可在线升级
+          * x86: immortalwrt_${{ env.OP_VERSION }}_x86_64_k*.img.gz —— UEFI 引导
           * 基本信息
           IP: 192.168.0.4
           账户: root
