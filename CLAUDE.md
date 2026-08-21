@@ -59,7 +59,7 @@ rg -n "luci-app|amlogic|clone" common/diy.sh armsr/armv8/N1/diy.sh common/files
 
 ```bash
 sh -n common/files/etc/uci-defaults/99-bypass-router
-bash -n common/diy.sh armsr/armv8/N1/diy.sh bin/build.sh bin/build-N1.sh bin/build-x86.sh
+bash -n common/diy.sh armsr/armv8/N1/diy.sh bin/build.sh bin/build-lib.sh bin/build-N1.sh bin/build-x86.sh bin/package.sh
 ```
 
 ### Local build (preferred)
@@ -155,18 +155,20 @@ This overlay becomes the root filesystem content in the final image, shared by b
 
 Treat files under this tree as runtime defaults, not build-time source code.
 
-### `bin/build.sh` (dispatcher) + `bin/build-N1.sh` / `bin/build-x86.sh`
+### `bin/build.sh` (dispatcher) + `bin/build-lib.sh` (shared) + `bin/build-N1.sh` / `bin/build-x86.sh`
 
 `bin/build.sh` is a thin dispatcher: it resolves the profile from the first positional arg or `$PROFILE`. With no profile it runs **both** in sequence (`build-N1.sh` then `build-x86.sh`, aborting before x86 if N1 fails); with a profile it runs just that one. All tunables pass through the environment.
 
-- `bin/build-N1.sh` — clones ImmortalWrt, runs `armsr/armv8/N1/diy.sh`, applies `common/files` + `armsr/armv8/N1/.config` + `common/config.services`, compiles, then invokes `bin/package.sh` to ophub-package the `rootfs.tar.gz` into `*.img.gz` (moved into `dist/`). Requires a prebuilt Go at `GO_BOOTSTRAP`. Scratch tree: `BUILD_ROOT/build`.
-- `bin/build-x86.sh` — same shape for the x86 profile (`common/diy.sh`, `x86/64/.config`), but **no ophub step**: it copies the already-bootable `*combined-efi.img.gz` from `bin/targets` into `dist/` (same final-image location as N1), renamed to the unified scheme (see "Unified image naming" above). `GO_BOOTSTRAP` optional. Scratch tree: `BUILD_ROOT/build-x86`, with its own `cache/feeds-x86` + `cache/ccache-x86` so it never collides with an N1 build.
+`bin/build-lib.sh` holds all the machinery the two profile builds share (~90% of the old scripts was duplicated): the common tunable defaults, the sanity checks (`check_buildroot_fs`/`check_disk`/`check_go_bootstrap`), `ensure_deps`, `setup_proxy`, `update_feeds`, `apply_overlay`, the full/incremental `do_build`, `publish_artifacts`, `print_build_time`, and `derive_op_version` (the `version.mk` parse, reused by `package.sh` too). It's a **pure function library** — sourcing sets the common defaults + defines functions but runs nothing; each wrapper drives the call order. A wrapper sets `PROFILE_DIR`, the scratch/cache names, `GO_REQUIRED` (1 on N1, 0 on x86 — controls whether the external Go bootstrap is mandatory), a banner, and a `run_diy()` hook, then sources the lib and calls the functions.
 
-Both keep the throwaway openwrt tree + caches under `BUILD_ROOT` (native volume, default `/opt/openwrt-build`) to avoid virtiofs corruption, and route outbound fetches through `ALL_PROXY`. Tunable via `BUILD_ROOT`/`ARTIFACT_DIR`/`GO_BOOTSTRAP`/`ALL_PROXY`/`JOBS`/`REPO_BRANCH`/`OPHUB_REPO`/`INCREMENTAL`.
+- `bin/build-N1.sh` (~76 lines) — sets the N1 profile dir + scratch tree (`BUILD_ROOT/build`, `cache/feeds`, `cache/ccache`), `GO_REQUIRED=1`, `run_diy(){ bash armsr/armv8/N1/diy.sh; }`; runs the shared flow, then invokes `bin/package.sh` to ophub-package the `rootfs.tar.gz` into `*.img.gz` (moved into `dist/`). Requires a prebuilt Go at `GO_BOOTSTRAP`.
+- `bin/build-x86.sh` (~101 lines) — sets the x86 profile dir + its own scratch subtree (`BUILD_ROOT/build-x86`, `cache/feeds-x86`, `cache/ccache-x86`, so it never collides with an N1 build), `GO_REQUIRED=0`, `run_diy(){ COMMON_DIR=… bash common/diy.sh; }`; runs the shared flow, then (**no ophub step**) copies the already-bootable `*combined-efi.img.gz` from `bin/targets` into `dist/`, renamed to the unified scheme via `derive_op_version` (see "Unified image naming"). `GO_BOOTSTRAP` optional. `dl/` is shared with N1 (same downloads); only feeds/ccache are per-profile.
+
+Both keep the throwaway openwrt tree + caches under `BUILD_ROOT` (native volume, default `/opt/openwrt-build`) to avoid virtiofs corruption, and route outbound fetches through `ALL_PROXY`. Tunable via `BUILD_ROOT`/`ARTIFACT_DIR`/`GO_BOOTSTRAP`/`ALL_PROXY`/`JOBS`/`REPO_BRANCH`/`OPHUB_REPO`/`INCREMENTAL` (defaults live in `build-lib.sh`).
 
 ### `bin/package.sh`
 
-Standalone packaging step (also called automatically by `bin/build-N1.sh`, **N1 only**): repackages an existing `$BUILD_ROOT/build/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz` into a flashable N1 `*.img.gz` via ophub, mirroring the workflow's "Package N1 firmware" step. Skips clone/feeds/compile entirely; requires a prior build and passwordless `sudo`. Tunable via `BUILD_ROOT`/`ALL_PROXY`/`OPHUB_REPO`. Not used by the x86 profile.
+Standalone packaging step (also called automatically by `bin/build-N1.sh`, **N1 only**): repackages an existing `$BUILD_ROOT/build/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz` into a flashable N1 `*.img.gz` via ophub, mirroring the workflow's "Package N1 firmware" step. Skips clone/feeds/compile entirely; requires a prior build and passwordless `sudo`. Sources `bin/build-lib.sh` only to reuse `derive_op_version` for the image name (sourcing has no side effects). Tunable via `BUILD_ROOT`/`ALL_PROXY`/`OPHUB_REPO`. Not used by the x86 profile.
 
 ## Working Notes
 

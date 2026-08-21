@@ -13,14 +13,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Reuse derive_op_version() (and its BUILD_ROOT/REPO_BRANCH defaults). Sourcing
+# the lib has no side effects beyond setting common tunable defaults + functions.
+# shellcheck source=bin/build-lib.sh
+source "$SCRIPT_DIR/build-lib.sh"
+
 # --- tunables ----------------------------------------------------------------
-: "${BUILD_ROOT:=/opt/openwrt-build}"
+# BUILD_ROOT / REPO_BRANCH defaults come from build-lib.sh. Package-only extras:
 # Outbound proxy for ophub kernel fetches.
 : "${ALL_PROXY:=socks5h://192.168.0.8:1180}"
 : "${OPHUB_REPO:=https://github.com/ophub/amlogic-s9xxx-openwrt}"
-# Source branch; the op version in the image name is derived from it
-# (openwrt-25.12 -> 25.12). Inherited from build-N1.sh when called by it.
-: "${REPO_BRANCH:=openwrt-25.12}"
 
 OUTDIR="$BUILD_ROOT/build"
 OPHUB_DIR="$BUILD_ROOT/ophub"
@@ -119,14 +121,9 @@ cp "$rootfs" "$OPHUB_DIR/openwrt-armsr/"
 # it and abort. Moving straight from out/ touches only what this run produced.
 imgdest="$REPO_ROOT/dist"
 mkdir -p "$imgdest"
-# op version is read from the built tree's include/version.mk (VERSION_NUMBER,
-# e.g. 25.12-SNAPSHOT) with -SNAPSHOT stripped -> 25.12; once upstream tags a
-# real patch level (25.12.1) it flows through. Falls back to REPO_BRANCH
-# (openwrt-25.12 -> 25.12) if the tree/line can't be read.
-op_version="$(sed -n 's/^VERSION_NUMBER:=$(if.*,\(.*\))$/\1/p' \
-    "$OUTDIR/openwrt/include/version.mk" 2>/dev/null | head -1)"
-op_version="${op_version%-SNAPSHOT}"
-[ -n "$op_version" ] || op_version="${REPO_BRANCH#openwrt-}"
+# op version is read from the built tree's include/version.mk, falling back to
+# REPO_BRANCH (openwrt-25.12 -> 25.12) if unreadable. See build-lib.sh.
+op_version="$(derive_op_version "$OUTDIR/openwrt/include/version.mk")"
 for src in "$OPHUB_DIR"/openwrt/out/*.img.gz; do
     base="$(basename "$src")"
     bk="$(echo "$base" | grep -oE 's905d_k[0-9]+\.[0-9]+\.[0-9]+' || true)"

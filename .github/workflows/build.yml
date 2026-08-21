@@ -317,6 +317,7 @@ jobs:
       uses: softprops/action-gh-release@v3.0.2
       with:
         tag_name: firmware_${{ env.FILE_DATE }}
+        make_latest: false
         files: dist/*.img.gz
         body: |
           N1 (Amlogic S905D) + x86/64 EFI 固件，构建于 ${{ env.FILE_DATE }}。
@@ -331,6 +332,7 @@ jobs:
       uses: softprops/action-gh-release@v3.0.2
       with:
         tag_name: latest
+        make_latest: true
         files: dist/*.img.gz
         body: |
           滚动更新的最新固件（N1 + x86），构建于 ${{ env.FILE_DATE }}。
@@ -347,6 +349,7 @@ jobs:
       uses: softprops/action-gh-release@v3.0.2
       with:
         tag_name: OpenWrt
+        make_latest: false
         files: n1-only/*.img.gz
         body: |
           滚动更新的最新 N1 固件（luci-app-amlogic 在线升级源），构建于 ${{ env.FILE_DATE }}。
