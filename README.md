@@ -1,11 +1,12 @@
 # 项目简介
 
-本固件定位**轻量旁路由**，不含 PPPoE、WiFi 相关功能。预置了旁路由常用服务集，但代理节点/订阅、服务配置等私有数据仍留给刷机后自行配置。目前提供两种构建目标（profile）：
+本固件定位**轻量旁路由**，预置了旁路由常用服务集，但代理节点/订阅、服务配置等私有数据仍留给刷机后自行配置。目前提供三种构建目标（profile）：
 
-- **N1**（`armsr/armv8/N1`）：斐讯 N1（Amlogic S905D），经 ophub/flippy 打包为可刷写的 `*.img.gz`，含 [luci-app-amlogic](https://github.com/ophub/luci-app-amlogic)（晶晨宝盒）在线升级。
+- **N1**（`armsr/armv8/N1`）：斐讯 N1（Amlogic S905D），经 ophub/flippy 打包为可刷写的 `*.img.gz`，含 [luci-app-amlogic](https://github.com/ophub/luci-app-amlogic)（晶晨宝盒）在线升级；板载 WiFi 默认开放 AP `N1-OpenWrt` 桥接进 LAN。
 - **x86**（`x86/64`）：x86/64 通用机型（软路由/虚拟机），OpenWrt 直接产出可 UEFI 引导的 combined-efi 镜像，无需 ophub 二次打包，也不含 luci-app-amlogic。
+- **armvirt**（`armsr/armv8/armvirt`）：ARM64 通用虚拟机（Apple Silicon 上的 UTM/QEMU，或任意 EDK2/UEFI aarch64 hypervisor）。与 N1 同 `armsr/armv8` target，但走 x86 那套流程直接产出可 UEFI 引导的 combined-efi 镜像（无 ophub、无 amlogic、无板载 WiFi，物理网卡 kmod 换 virtio）。
 
-两种 profile 共享同一套旁路由服务与 overlay（见 `common/`），只有 target/rootfs/打包流程不同。
+三种 profile 共享同一套旁路由服务与 overlay（见 `common/`），只有 target/rootfs/打包流程不同。
 
 固件预置的 luci-app 与服务：
 
@@ -13,37 +14,40 @@
 - AdGuardHome：DNS 过滤
 - SNMP（snmpd）：监控
 - KMS（vlmcsd）：激活服务
+- EasyTier（luci-app-easytier）：异地组网（节点名/密钥等敏感信息留刷机后在 LuCI 配置）
 - （仅 N1）luci-app-amlogic：系统更新、内核更新、CPU 调频等
 
-首启会通过 `etc/uci-defaults/99-bypass-router` 自动完成旁路由基础设置：关闭 DHCP/DHCPv6、开启 IPv4 转发、启用软件流量卸载（S905D 无硬件 offload，硬件卸载与 fullcone NAT 均关闭以免 firewall4 加载失败）、设置时区（Asia/Shanghai）与国内 NTP 服务器。amlogic 相关配置仅在检测到 `/etc/config/amlogic` 时写入，x86 上自动跳过。
+首启会通过 `etc/uci-defaults/99-bypass-router` 自动完成旁路由基础设置：关闭 DHCP/DHCPv6、开启 IPv4 转发、启用软件流量卸载（S905D 无硬件 offload，硬件卸载与 fullcone NAT 均关闭以免 firewall4 加载失败）、设置时区（Asia/Shanghai）与国内 NTP 服务器。amlogic 相关配置仅在检测到 `/etc/config/amlogic` 时写入，x86/armvirt 上自动跳过。
 
 LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `common/files/etc/config/network` 调整，两 profile 共用）。
 
 ## 本地构建
 
-在仓库根目录直接执行（`bin/build.sh` 是入口，按 profile 分发到 `bin/build-N1.sh` / `bin/build-x86.sh`）：
+在仓库根目录直接执行（`bin/build.sh` 是入口，按 profile 分发到 `bin/build-N1.sh` / `bin/build-x86.sh` / `bin/build-armvirt.sh`）：
 
 ```bash
-./bin/build.sh          # 不带参数：依次构建 N1 和 x86（两个）
+./bin/build.sh          # 不带参数：依次构建 N1、x86、armvirt（三个）
 ./bin/build.sh N1       # 只构建斐讯 N1（Amlogic S905D）
 ./bin/build.sh x86      # 只构建 x86/64 EFI
+./bin/build.sh armvirt  # 只构建 ARM64 虚拟机 EFI（UTM/QEMU）
 ```
 
-> 每个 profile 都是独立的 20-30G / 完整 `make`，两个一起跑时间和磁盘都翻倍。x86 用独立 scratch 子树（`build-x86`/`feeds-x86`/`ccache-x86`），跟 N1 共存不冲突。N1 构建失败会中止、不再跑 x86。
+> 每个 profile 都是独立的 20-30G / 完整 `make`，一起跑时间和磁盘成倍增长。x86、armvirt 各用独立 scratch 子树（`build-x86`/`feeds-x86`/`ccache-x86`、`build-armvirt`/…），跟 N1 共存不冲突。N1 构建失败会中止、不再跑后续 profile。
 
-脚本会克隆 ImmortalWrt、跑对应的 `diy.sh`、铺上共享 overlay + profile 的 config 并编译。N1 产物在编译后经 ophub 打包为 `*.img.gz`；x86 直接产出可引导的 `*-generic-squashfs-combined-efi.img.gz`。
+脚本会克隆 ImmortalWrt、跑对应的 `diy.sh`、铺上共享 overlay + profile 的 config 并编译。N1 产物在编译后经 ophub 打包为 `*.img.gz`；x86、armvirt 直接产出可引导的 `*-generic-squashfs-combined-efi.img.gz`。
 
-**最终可刷写镜像**（两个 profile 都）落到仓库根的 `dist/`（已 git-ignore）：N1 由 `package.sh` 移入，x86 的 combined-efi 由 `build-x86.sh` 拷入。两者都会重命名为统一格式 `immortalwrt_<op版本>_<平台>_k<内核号>_<日期>.img.gz`（op 版本从构建产物 `include/version.mk` 的 `VERSION_NUMBER` 读取并剥离 `-SNAPSHOT`，如 `25.12-SNAPSHOT` → `25.12`；上游打出正式补丁号 `25.12.1` 时自动跟随）：
+**最终可刷写镜像**（三个 profile 都）落到仓库根的 `dist/`（已 git-ignore）：N1 由 `package.sh` 移入，x86/armvirt 的 combined-efi 由各自的 `build-*.sh` 拷入。两者都会重命名为统一格式 `immortalwrt_<op版本>_<平台>_k<内核号>_<日期>.img.gz`（op 版本从构建产物 `include/version.mk` 的 `VERSION_NUMBER` 读取并剥离 `-SNAPSHOT`，如 `25.12-SNAPSHOT` → `25.12`；上游打出正式补丁号 `25.12.1` 时自动跟随）：
 
 ```
-N1:  immortalwrt_25.12_s905d_k6.12.48_2026.08.21.img.gz
-x86: immortalwrt_25.12_x86_64_k6.12.103_2026.08.21.img.gz
+N1:      immortalwrt_25.12_s905d_k6.12.48_2026.08.21.img.gz
+x86:     immortalwrt_25.12_x86_64_k6.12.103_2026.08.21.img.gz
+armvirt: immortalwrt_25.12_armv8_k6.12.103_2026.08.21.img.gz
 ```
 
-N1 保留 `s905d_k6.12.NN` 段供晶晨宝盒 OTA 识别（内核为 ophub/flippy 版），x86 内核号取自编译产物 `.manifest`（ImmortalWrt 官方编译），两者内核不同源。完整的中间产物（整个 `bin/targets`）另外输出到原生盘：
+N1 保留 `s905d_k6.12.NN` 段供晶晨宝盒 OTA 识别（内核为 ophub/flippy 版），x86/armvirt 内核号取自编译产物 `.manifest`（ImmortalWrt 官方编译），与 N1 内核不同源。完整的中间产物（整个 `bin/targets`）另外输出到原生盘（N1 与 armvirt 同为 `armsr/armv8` target，`build.sh` 全跑时该目录只留最后一个 profile 的中间产物，但各自最终镜像都已落到 `dist/`）：
 
 ```bash
-/opt/openwrt-build/output/bin/targets/armsr/armv8/   # N1 中间产物
+/opt/openwrt-build/output/bin/targets/armsr/armv8/   # N1 / armvirt 中间产物
 /opt/openwrt-build/output/bin/targets/x86/64/        # x86 中间产物
 ```
 
@@ -57,7 +61,7 @@ N1 保留 `s905d_k6.12.NN` 段供晶晨宝盒 OTA 识别（内核为 ophub/flipp
 sudo ./bin/build-deps.sh
 ```
 
-**N1 另需**一份预编译 Go 作为外部 bootstrap（OpenWrt Go ≥1.26 需要 ≥1.24.6 的 bootstrap，arm64 上不能从源码起），装到 `/usr/local/go-bootstrap`（`GO_BOOTSTRAP`）。脚本检测不到时会打印安装命令。x86 可从源码起 Go，`GO_BOOTSTRAP` 存在则复用、缺失也不强制。
+**N1 和 armvirt 另需**一份预编译 Go 作为外部 bootstrap（OpenWrt Go ≥1.26 需要 ≥1.24.6 的 bootstrap，本地 arm64 host 上不能从源码起），装到 `/usr/local/go-bootstrap`（`GO_BOOTSTRAP`）。脚本检测不到时会打印安装命令。x86 可从源码起 Go，`GO_BOOTSTRAP` 存在则复用、缺失也不强制。（CI 用 x86_64 runner 交叉编译，能从源码起 Go，故无需 bootstrap。）
 
 常用覆盖项（对两个 profile 通用）：
 
@@ -74,5 +78,5 @@ JOBS=4 ./bin/build.sh                             # 限并发
 
 # 致谢
 
-本项目基于 [ImmortalWrt-25.12](https://github.com/immortalwrt/immortalwrt/tree/openwrt-25.12) 源码编译。N1 使用 ophub 的[脚本](https://github.com/ophub/amlogic-s9xxx-openwrt)和 flippy 的[内核](https://github.com/ophub/kernel/releases/tag/kernel_flippy)打包为可刷写固件；x86 由 OpenWrt 官方直接产出 EFI 镜像。感谢开发者们的无私分享。<br>
+本项目基于 [ImmortalWrt-25.12](https://github.com/immortalwrt/immortalwrt/tree/openwrt-25.12) 源码编译。N1 使用 ophub 的[脚本](https://github.com/ophub/amlogic-s9xxx-openwrt)和 flippy 的[内核](https://github.com/ophub/kernel/releases/tag/kernel_flippy)打包为可刷写固件；x86、armvirt 由 OpenWrt 官方直接产出 EFI 镜像。感谢开发者们的无私分享。<br>
 flippy 固件（N1）的更多细节参考[恩山论坛帖子](https://www.right.com.cn/forum/thread-4076037-1-1.html)。
