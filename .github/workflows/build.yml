@@ -288,6 +288,15 @@ jobs:
         opver="$(basename "${anyimg:-}" | cut -d_ -f2)"
         [ -n "$opver" ] || opver="${REPO_BRANCH#openwrt-}"
         echo "OP_VERSION=$opver" >> $GITHUB_ENV
+        # Kernel numbers live in the image name's _k<kernel>_ segment. N1 and x86
+        # use different kernels (flippy vs ImmortalWrt), so pull each separately;
+        # empty if that profile wasn't built this run.
+        n1img="$(find dist -name '*_s905d_*.img.gz' | head -1)"
+        x86img="$(find dist -name '*_x86_64_*.img.gz' | head -1)"
+        n1k="$(basename "${n1img:-}" | grep -oP '_k\K[0-9.]+' || true)"
+        x86k="$(basename "${x86img:-}" | grep -oP '_k\K[0-9.]+' || true)"
+        echo "N1_KERNEL=$n1k" >> $GITHUB_ENV
+        echo "X86_KERNEL=$x86k" >> $GITHUB_ENV
         # N1 images (unified name) match the amlogic OTA regex; x86 don't. Split
         # them out by the _s905d_ segment for the fixed OpenWrt (OTA) tag.
         mkdir -p n1-only
@@ -304,39 +313,25 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -euo pipefail
-        for tag in "firmware_${FILE_DATE}" latest; do
-          gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
-        done
+        gh release delete "firmware_${FILE_DATE}" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
         # OpenWrt (N1 OTA) only when we actually have an N1 image to republish;
         # an x86-only run must not wipe the OTA source without replacing it.
+        # --cleanup-tag also drops the git tag so softprops recreates it fresh at
+        # the current commit (delete the tag first, then re-release).
         if ls n1-only/*.img.gz >/dev/null 2>&1; then
-          gh release delete OpenWrt --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release delete OpenWrt --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
         fi
 
     - name: Publish combined dated release
       uses: softprops/action-gh-release@v3.0.2
       with:
         tag_name: firmware_${{ env.FILE_DATE }}
-        make_latest: false
-        files: dist/*.img.gz
-        body: |
-          N1 (Amlogic S905D) + x86/64 EFI 固件，构建于 ${{ env.FILE_DATE }}。
-          * N1: immortalwrt_${{ env.OP_VERSION }}_s905d_k*.img.gz —— 晶晨宝盒可在线升级
-          * x86: immortalwrt_${{ env.OP_VERSION }}_x86_64_k*.img.gz —— UEFI 引导
-          * 基本信息
-          IP: 192.168.0.4
-          账户: root
-          密码: password
-
-    - name: Update rolling release (latest)
-      uses: softprops/action-gh-release@v3.0.2
-      with:
-        tag_name: latest
         make_latest: true
         files: dist/*.img.gz
         body: |
-          滚动更新的最新固件（N1 + x86），构建于 ${{ env.FILE_DATE }}。
-          历史版本见 firmware_<日期> 标签。
+          ImmortalWrt ${{ env.OP_VERSION }} · N1 (Amlogic S905D) + x86/64 EFI 固件，构建于 ${{ env.FILE_DATE }}。
+          * N1: immortalwrt_${{ env.OP_VERSION }}_s905d_k${{ env.N1_KERNEL }}_*.img.gz —— 内核 ${{ env.N1_KERNEL }}（flippy），晶晨宝盒可在线升级
+          * x86: immortalwrt_${{ env.OP_VERSION }}_x86_64_k${{ env.X86_KERNEL }}_*.img.gz —— 内核 ${{ env.X86_KERNEL }}（ImmortalWrt），UEFI 引导
           * 基本信息
           IP: 192.168.0.4
           账户: root
@@ -352,7 +347,7 @@ jobs:
         make_latest: false
         files: n1-only/*.img.gz
         body: |
-          滚动更新的最新 N1 固件（luci-app-amlogic 在线升级源），构建于 ${{ env.FILE_DATE }}。
+          ImmortalWrt ${{ env.OP_VERSION }} · N1 内核 ${{ env.N1_KERNEL }}（flippy）—— 滚动更新的最新 N1 固件（luci-app-amlogic 在线升级源），构建于 ${{ env.FILE_DATE }}。
           历史版本见 firmware_<日期> 标签。
           * 基本信息
           IP: 192.168.0.4
