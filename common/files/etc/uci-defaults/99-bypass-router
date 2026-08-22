@@ -62,6 +62,28 @@ if [ -f /etc/config/firewall ]; then
 	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 	uci -q set firewall.@defaults[0].fullcone='0'
 	uci -q set firewall.@defaults[0].fullcone6='0'
+
+	# lan → EasyTier 转发放行。easytier 插件的 auto_config_firewall 只建了 EasyTier
+	# zone(masq)和 tun0 的 accept，漏了 lan→EasyTier 的跨区转发，导致局域网机器
+	# 经本机访问 easytier 代理子网(如 192.168.4.0/24)时被 forward 链 drop、回 icmp
+	# port-unreachable。这里补上;fw4 会忽略指向未建 zone 的 forwarding，故 easytier
+	# 未启用时加了也无害，插件建好 EasyTier zone 后自动生效。幂等：已存在则跳过。
+	et_fwd_exists=0
+	i=0
+	while uci -q get firewall.@forwarding[$i] >/dev/null 2>&1; do
+		if [ "$(uci -q get firewall.@forwarding[$i].src)" = "lan" ] && \
+		   [ "$(uci -q get firewall.@forwarding[$i].dest)" = "EasyTier" ]; then
+			et_fwd_exists=1
+			break
+		fi
+		i=$((i + 1))
+	done
+	if [ "$et_fwd_exists" = "0" ]; then
+		s="$(uci add firewall forwarding)"
+		uci -q set firewall."$s".src='lan'
+		uci -q set firewall."$s".dest='EasyTier'
+	fi
+
 	uci -q commit firewall
 fi
 
