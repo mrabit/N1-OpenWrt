@@ -146,10 +146,17 @@ apply_overlay() {
     cp "$PROFILE_DIR/.config" ./.config
     cat "$COMMON_DIR/config.services" >> .config
 
-    # ccache: reuse cached object files across recompiles.
+    # ccache: reuse cached object files across recompiles. Pin CCACHE_DIR to the
+    # persistent per-profile cache via CONFIG_CCACHE_DIR — a bare `export
+    # CCACHE_DIR` is NOT enough: rules.mk does `export CCACHE_DIR := $(TOPDIR)/
+    # .ccache`, and a makefile `:=` assignment overrides an inherited env var, so
+    # the shell export was silently ignored and ccache wrote into the (wiped-on-
+    # clean-build) tree instead of the persistent cache. rules.mk honours
+    # CONFIG_CCACHE_DIR when set: $(if $(CONFIG_CCACHE_DIR),...,$(TOPDIR)/.ccache).
     export CCACHE_DIR
-    cat >> .config <<'EOF'
+    cat >> .config <<EOF
 CONFIG_CCACHE=y
+CONFIG_CCACHE_DIR="$CCACHE_DIR"
 EOF
     make defconfig
 

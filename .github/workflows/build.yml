@@ -143,7 +143,17 @@ jobs:
         [ -d "$profile_files" ] && cp -rf "$profile_files/." openwrt/files/
         cp ${{ matrix.config }} openwrt/.config
         cat common/config.services >> openwrt/.config
-        echo "CONFIG_CCACHE=y" >> openwrt/.config
+        # Enable ccache AND pin its dir to the exact absolute path actions/cache
+        # saves. Without CONFIG_CCACHE_DIR, rules.mk defaults CCACHE_DIR to
+        # $(TOPDIR)/.ccache — resolved via the $GITHUB_WORKSPACE/openwrt symlink,
+        # so it never lined up with /workdir/openwrt/.ccache and the post-step hit
+        # "Path(s) ... do(es) not exist, hence no cache is being saved" (0 s save,
+        # 0 ccache entries ever → every run cold-compiled ~92 min). rules.mk uses
+        # $(if $(CONFIG_CCACHE_DIR),...,$(TOPDIR)/.ccache), so setting it wins.
+        {
+          echo "CONFIG_CCACHE=y"
+          echo 'CONFIG_CCACHE_DIR="/workdir/openwrt/.ccache"'
+        } >> openwrt/.config
 
     - name: Cache ccache
       uses: actions/cache@v4
@@ -154,12 +164,21 @@ jobs:
           ccache-${{ matrix.cache }}-${{ env.REPO_BRANCH }}-
 
     - name: Cache downloads
+      # Shared across ALL profiles (no matrix.cache in the key): N1/x86/armvirt
+      # download near-identical source tarballs (same common/config.services), so
+      # 3 separate dl caches wasted ~2/3 of the 10 GB repo budget. This is a budget
+      # optimization, NOT the ccache fix — ccache was empty because of the path bug
+      # (see CONFIG_CCACHE_DIR), not eviction. But once ccache actually saves
+      # (~2.5G x 3 profiles), the freed dl budget is what keeps all three under the
+      # 10 GB ceiling instead of evicting each other. Parallel matrix legs restore
+      # fine; only the first save with this key wins (others get a harmless
+      # "Cache already exists"), converging over runs.
       uses: actions/cache@v4
       with:
         path: /workdir/openwrt/dl
-        key: dl-${{ matrix.cache }}-${{ env.REPO_BRANCH }}-${{ env.FILE_DATE }}
+        key: dl-${{ env.REPO_BRANCH }}-${{ env.FILE_DATE }}
         restore-keys: |
-          dl-${{ matrix.cache }}-${{ env.REPO_BRANCH }}-
+          dl-${{ env.REPO_BRANCH }}-
 
     - name: SSH connect to Actions
       uses: P3TERX/ssh2actions@v1.0.0
@@ -174,10 +193,18 @@ jobs:
 
     - name: Compile firmware
       env:
-        CCACHE_MAXSIZE: 2G
+        # 2G thrashes within a single full build (toolchain+kernel+all pkgs
+        # generate > 2G of objects), so early objects get evicted before a later
+        # unit reuses them. Now that ccache actually persists (see CONFIG_CCACHE_DIR
+        # above — before that fix nothing was ever saved, so maxsize was moot),
+        # 2.5G lets a full build's objects survive both within and across runs.
+        CCACHE_MAXSIZE: 2.5G
       run: |
         chmod -R 755 openwrt
         cd openwrt
+        # Ensure the pinned ccache dir exists before compile so actions/cache finds
+        # a populated path in its post-step (empty/missing = silent "no cache saved").
+        mkdir -p /workdir/openwrt/.ccache
         echo -e "$(nproc) thread compile"
         make -j$(( $(nproc) + 1 )) || make -j1 V=s
     - name: Package N1 firmware (ophub)
