@@ -27,7 +27,7 @@ on:
           - N1
           - x86
   schedule:
-    - cron: "27 18 1,16 * *"
+    - cron: "27 18 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
