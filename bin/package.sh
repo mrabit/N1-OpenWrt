@@ -110,7 +110,7 @@ cp "$rootfs" "$OPHUB_DIR/openwrt-armsr/"
 
 # remake ran as root, so its out/ images are root-owned; move them to the
 # repo's dist/ dir, renaming to the unified scheme shared with x86:
-#   immortalwrt_<op>_<board>_k<kernel>_<date>.img.gz
+#   immortalwrt_<op>_<board>_k<kernel>_<date>_<time>.img.gz
 # The `s905d_k6.12.NN` segment is preserved verbatim from ophub's name because
 # luci-app-amlogic OTA matches on `.*_s905d_.*k6.12.[0-9]+.*.img.gz` — renaming
 # is safe as long as that segment and the .img.gz suffix survive. The date is
@@ -132,9 +132,11 @@ for src in "$OPHUB_DIR"/openwrt/out/*.img.gz; do
         echo "       OTA needs it and the naming scheme requires it." >&2
         exit 1
     fi
-    imgdate="$(echo "$base" | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}' | head -1 || true)"
-    [ -z "$imgdate" ] && imgdate="$(date +%Y.%m.%d)"
-    newname="immortalwrt_${op_version}_${bk}_${imgdate}.img.gz"
+    # Stamp = dotted date + _HHMMSS (no ':', git/filename-safe), matching the
+    # workflow's unified scheme. ophub only encodes a date, so we always mint the
+    # full stamp locally (build/package time).
+    imgstamp="$(date '+%Y.%m.%d_%H%M%S')"
+    newname="immortalwrt_${op_version}_${bk}_${imgstamp}.img.gz"
     # Recompress instead of mv: ophub's gzip stored the pre-rename name in the
     # FNAME header, so `gunzip -N`/GUI tools would decompress our renamed .gz to
     # the stale name. `gzip -n` writes no name/mtime, so extraction falls back to

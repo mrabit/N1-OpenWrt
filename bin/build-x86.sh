@@ -6,7 +6,7 @@
 # config (+ common/config.services) and compiles. Unlike N1 there is NO ophub
 # repackaging: OpenWrt's x86 target already emits a bootable
 # *-generic-squashfs-combined-efi.img.gz, which is published after renaming to
-# the unified scheme shared with N1 (immortalwrt_<op>_x86_64_k<kernel>_<date>).
+# the unified scheme shared with N1 (immortalwrt_<op>_x86_64_k<kernel>_<date>_<time>).
 #
 # The openwrt tree and all caches live under BUILD_ROOT, which MUST be on a native
 # ext4/xfs/btrfs volume (OpenWrt's parallel small-file writes corrupt on virtiofs).
@@ -73,10 +73,11 @@ mkdir -p "$imgdest"
 src="$(find "$dest" -name '*squashfs-combined-efi.img.gz' -print -quit)"
 if [ -n "$src" ]; then
     # Rename to the unified scheme shared with N1:
-    #   immortalwrt_<op>_x86_64_k<kernel>_<date>.img.gz
-    # The kernel version comes from the target manifest (e.g. 6.12.103); the date
-    # is generated locally (TZ from the environment). x86 has no OTA naming
-    # constraint, so this is purely cosmetic alignment with N1.
+    #   immortalwrt_<op>_x86_64_k<kernel>_<date>_<time>.img.gz
+    # The kernel version comes from the target manifest (e.g. 6.12.103); the
+    # date+time stamp (2026.08.23_143005, HHMMSS, no ':') is generated locally
+    # (TZ from the environment). x86 has no OTA naming constraint, so this is
+    # purely cosmetic alignment with N1.
     op_version="$(derive_op_version "$OUTDIR/openwrt/include/version.mk")"
     kver="$(grep -E '^kernel ' "$dest"/x86/64/*.manifest 2>/dev/null \
         | awk '{print $3}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
@@ -86,8 +87,8 @@ if [ -n "$src" ]; then
         grep -E '^kernel ' "$dest"/x86/64/*.manifest >&2 || echo "  (no ^kernel line)" >&2
         exit 1
     fi
-    imgdate="$(date +%Y.%m.%d)"
-    newname="immortalwrt_${op_version}_x86_64_k${kver}_${imgdate}.img.gz"
+    imgstamp="$(date '+%Y.%m.%d_%H%M%S')"
+    newname="immortalwrt_${op_version}_x86_64_k${kver}_${imgstamp}.img.gz"
     cp -f "$src" "$imgdest/$newname"
     echo "Flashable EFI image copied to $imgdest:"
     ls -1 "$imgdest/$newname"

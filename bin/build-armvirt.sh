@@ -8,7 +8,7 @@
 # *-generic-squashfs-combined-efi.img.gz (ARM SystemReady / UEFI), which boots
 # directly under UTM/QEMU on Apple Silicon and any EDK2 aarch64 hypervisor. It's
 # published after renaming to the unified scheme shared with N1/x86
-# (immortalwrt_<op>_armv8_k<kernel>_<date>). "armvirt" is the ARM-community name for
+# (immortalwrt_<op>_armv8_k<kernel>_<date>_<time>). "armvirt" is the ARM-community name for
 # an ARM virtual-machine image (an OpenWrt legacy target name); the image's board
 # segment stays `armv8` (the arch), matching N1's `s905d` / x86's `x86_64`.
 #
@@ -81,10 +81,10 @@ mkdir -p "$imgdest"
 src="$(find "$dest" -name '*squashfs-combined-efi.img.gz' -print -quit)"
 if [ -n "$src" ]; then
     # Rename to the unified scheme shared with N1/x86:
-    #   immortalwrt_<op>_armv8_k<kernel>_<date>.img.gz
+    #   immortalwrt_<op>_armv8_k<kernel>_<date>_<time>.img.gz
     # The kernel version comes from the target manifest (ImmortalWrt's own build);
-    # the date is generated locally (TZ from the environment). No OTA naming
-    # constraint here, so this is purely cosmetic alignment.
+    # the date+time stamp (2026.08.23_143005, HHMMSS, no ':') is generated locally
+    # (TZ from the environment). No OTA naming constraint here, cosmetic alignment.
     op_version="$(derive_op_version "$OUTDIR/openwrt/include/version.mk")"
     kver="$(grep -E '^kernel ' "$dest"/armsr/armv8/*.manifest 2>/dev/null \
         | awk '{print $3}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
@@ -94,8 +94,8 @@ if [ -n "$src" ]; then
         grep -E '^kernel ' "$dest"/armsr/armv8/*.manifest >&2 || echo "  (no ^kernel line)" >&2
         exit 1
     fi
-    imgdate="$(date +%Y.%m.%d)"
-    newname="immortalwrt_${op_version}_armv8_k${kver}_${imgdate}.img.gz"
+    imgstamp="$(date '+%Y.%m.%d_%H%M%S')"
+    newname="immortalwrt_${op_version}_armv8_k${kver}_${imgstamp}.img.gz"
     cp -f "$src" "$imgdest/$newname"
     echo "Flashable EFI image copied to $imgdest:"
     ls -1 "$imgdest/$newname"

@@ -158,6 +158,21 @@ apply_overlay() {
 CONFIG_CCACHE=y
 CONFIG_CCACHE_DIR="$CCACHE_DIR"
 EOF
+
+    # Bake the build date into VERSION_CODE (%C) so it surfaces in LuCI
+    # Status → Overview "固件版本": DISTRIB_DESCRIPTION / OPENWRT_RELEASE = "%D %V %C"
+    # → "ImmortalWrt 25.12-SNAPSHOT 2026.08.23 14:30:05". Only touches %C (defaults
+    # to the git REVISION otherwise); VERSION_NUMBER is untouched, so derive_op_version
+    # / image names are unaffected. TZ inherited from the env (same as imgdate). The
+    # space in the date is fine: %C keeps spaces for display (only the %c filename
+    # variant transforms them), and VERSION_CODE never enters our image names.
+    # CONFIG_VERSIONOPT=y is the master toggle: without it the VERSION_* symbols
+    # are gated off and `make defconfig` strips them (verified against ImmortalWrt's
+    # official config.buildinfo, which ships CONFIG_VERSIONOPT=y + CONFIG_VERSION_*).
+    cat >> .config <<EOF
+CONFIG_VERSIONOPT=y
+CONFIG_VERSION_CODE="$(date '+%Y.%m.%d %H:%M:%S')"
+EOF
     make defconfig
 
     if [ "${GO_REQUIRED:-0}" = "1" ] || [ -x "$GO_BOOTSTRAP/bin/go" ]; then

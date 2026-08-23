@@ -52,7 +52,19 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
+      build_stamp: ${{ steps.stamp.outputs.build_stamp }}
     steps:
+      - name: Mint one global build stamp
+        id: stamp
+        # setup runs exactly once, before the parallel build legs and the release
+        # job — the single point where all artifacts can agree on ONE timestamp.
+        # Format 2026.08.23_143005 (dotted date + HHMMSS, no colon: git tags and
+        # filenames reject ':'). TZ from workflow env (Asia/Shanghai). Every build
+        # leg bakes this exact value into its image name; the release job reads it
+        # back OUT of the filename (images stay the single source of truth), so the
+        # tag firmware_<date>_<time> always matches the images to the second.
+        run: |
+          echo "build_stamp=$(TZ="$TZ" date '+%Y.%m.%d_%H%M%S')" >> "$GITHUB_OUTPUT"
       - name: Compute build matrix
         id: set
         env:
@@ -153,6 +165,17 @@ jobs:
         {
           echo "CONFIG_CCACHE=y"
           echo 'CONFIG_CCACHE_DIR="/workdir/openwrt/.ccache"'
+          # Bake the build date into VERSION_CODE (%C) so LuCI Status → Overview
+          # "固件版本" shows it: DISTRIB_DESCRIPTION / OPENWRT_RELEASE = "%D %V %C"
+          # → "ImmortalWrt 25.12-SNAPSHOT 2026.08.23 14:30:05". Only %C (defaults to
+          # git REVISION otherwise); VERSION_NUMBER untouched, so OP_VERSION / image
+          # names are unaffected. TZ=Asia/Shanghai from job env (matches FILE_DATE).
+          # The space is fine — %C keeps spaces for display; VERSION_CODE isn't in
+          # our image names (only the %c filename variant would transform spaces).
+          # CONFIG_VERSIONOPT=y is the master toggle — without it defconfig strips
+          # the VERSION_* symbols (verified vs ImmortalWrt's official buildinfo).
+          echo "CONFIG_VERSIONOPT=y"
+          echo "CONFIG_VERSION_CODE=\"$(date '+%Y.%m.%d %H:%M:%S')\""
         } >> openwrt/.config
 
     - name: Cache ccache
@@ -224,9 +247,9 @@ jobs:
         set -euo pipefail
         out="out/${{ matrix.profile }}"
         mkdir -p "$out"
-        # Unified naming shared by both profiles:
-        #   N1:  immortalwrt_<op>_s905d_k<kernel>_<date>.img.gz
-        #   x86: immortalwrt_<op>_x86_64_k<kernel>_<date>.img.gz
+        # Unified naming shared by both profiles (<date>_<time> = 2026.08.23_143005):
+        #   N1:  immortalwrt_<op>_s905d_k<kernel>_<date>_<time>.img.gz
+        #   x86: immortalwrt_<op>_x86_64_k<kernel>_<date>_<time>.img.gz
         # N1 keeps the `s905d_k6.12.NN` segment so luci-app-amlogic OTA
         # (regex .*_s905d_.*k6.12.[0-9]+.*.img.gz) still matches it.
         # op version is read from the built tree's include/version.mk
@@ -238,7 +261,9 @@ jobs:
           openwrt/include/version.mk 2>/dev/null | head -1)"
         OP_VERSION="${OP_VERSION%-SNAPSHOT}"
         [ -n "$OP_VERSION" ] || OP_VERSION="${REPO_BRANCH#openwrt-}"
-        imgdate="$(TZ="$TZ" date +%Y.%m.%d)"
+        # One global stamp from setup (2026.08.23_143005) — all 3 profiles share it,
+        # so the images (and the release tag derived from them) agree to the second.
+        imgstamp="${{ needs.setup.outputs.build_stamp }}"
         case "${{ matrix.profile }}" in
         N1)
           # ophub exports PACKAGED_OUTPUTPATH with the flashable *.img.gz.
@@ -250,15 +275,13 @@ jobs:
             echo "       OTA needs it and the naming scheme requires it." >&2
             exit 1
           fi
-          opdate="$(echo "$base" | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}' | head -1 || true)"
-          [ -n "$opdate" ] && imgdate="$opdate"
           # Recompress instead of cp: ophub's gzip stored the pre-rename name
           # (openwrt_amlogic_...) in the FNAME header, so `gunzip -N`/GUI tools
           # would decompress our renamed .gz to the stale name. `gzip -n` writes
           # no name/mtime, so extraction falls back to stripping .gz and matches
           # the shell (same as x86/armvirt, which store no FNAME). gzip -dc (not zcat:
           # BSD zcat only groks .Z) for portability.
-          gzip -dc "$src" | gzip -n > "$out/immortalwrt_${OP_VERSION}_${bk}_${imgdate}.img.gz"
+          gzip -dc "$src" | gzip -n > "$out/immortalwrt_${OP_VERSION}_${bk}_${imgstamp}.img.gz"
           ;;
         x86|armvirt)
           # x86 and armvirt both emit a bootable EFI combined image directly (x86/64
@@ -284,7 +307,7 @@ jobs:
             grep -E '^kernel ' "$outdir"/*.manifest >&2 || echo "  (no ^kernel line)" >&2
             exit 1
           fi
-          cp -v "$src" "$out/immortalwrt_${OP_VERSION}_${board}_k${kver}_${imgdate}.img.gz"
+          cp -v "$src" "$out/immortalwrt_${OP_VERSION}_${board}_k${kver}_${imgstamp}.img.gz"
           ;;
         esac
 
@@ -300,13 +323,6 @@ jobs:
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
-    - name: Set date and version
-      run: |
-        echo "FILE_DATE=$(TZ=$TZ date +"%Y%m%d")" >> $GITHUB_ENV
-        # OP_VERSION is derived after download, from the image filenames
-        # themselves (see "List collected images") — the images are the single
-        # source of truth, so the release notes always match what was built.
-
     - name: Download all firmware artifacts
       uses: actions/download-artifact@v4
       with:
@@ -327,6 +343,17 @@ jobs:
         opver="$(basename "${anyimg:-}" | cut -d_ -f2)"
         [ -n "$opver" ] || opver="${REPO_BRANCH#openwrt-}"
         echo "OP_VERSION=$opver" >> $GITHUB_ENV
+        # Build stamp lives in the image name's tail: immortalwrt_<op>_<board>_k<kernel>_<date>_<time>.img.gz
+        # e.g. ..._2026.08.23_143005.img.gz. Pull the 2026.08.23_143005 tail (last
+        # two _-fields) — the images are the single source of truth, so tag + notes
+        # match them to the second. TAG_STAMP is git/asset-safe (no ':'); FILE_DISPLAY
+        # is the human form 2026.08.23 14:30:05 for the release notes.
+        base="$(basename "${anyimg:-}" .img.gz)"
+        imgdate="$(echo "$base" | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}_[0-9]{6}' | head -1 || true)"
+        [ -n "$imgdate" ] || imgdate="$(TZ=$TZ date '+%Y.%m.%d_%H%M%S')"
+        d="${imgdate%_*}"; t="${imgdate#*_}"    # d=2026.08.23  t=143005
+        echo "TAG_STAMP=${d//./}_${t}" >> $GITHUB_ENV        # firmware tag: 20260823_143005
+        echo "FILE_DISPLAY=${d} ${t:0:2}:${t:2:2}:${t:4:2}" >> $GITHUB_ENV  # notes: 2026.08.23 14:30:05
         # Kernel numbers live in the image name's _k<kernel>_ segment. N1 and x86
         # use different kernels (flippy vs ImmortalWrt), so pull each separately;
         # empty if that profile wasn't built this run.
@@ -355,7 +382,7 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -euo pipefail
-        gh release delete "firmware_${FILE_DATE}" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+        gh release delete "firmware_${TAG_STAMP}" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
         # OpenWrt (N1 OTA) only when we actually have an N1 image to republish;
         # an x86-only run must not wipe the OTA source without replacing it.
         # --cleanup-tag also drops the git tag so softprops recreates it fresh at
@@ -367,11 +394,11 @@ jobs:
     - name: Publish combined dated release
       uses: softprops/action-gh-release@v3.0.2
       with:
-        tag_name: firmware_${{ env.FILE_DATE }}
+        tag_name: firmware_${{ env.TAG_STAMP }}
         make_latest: true
         files: dist/*.img.gz
         body: |
-          ImmortalWrt ${{ env.OP_VERSION }} · N1 (Amlogic S905D) + x86/64 + ARM64 VM (armvirt) EFI 固件，构建于 ${{ env.FILE_DATE }}。
+          ImmortalWrt ${{ env.OP_VERSION }} · N1 (Amlogic S905D) + x86/64 + ARM64 VM (armvirt) EFI 固件，构建于 ${{ env.FILE_DISPLAY }}。
           * N1: immortalwrt_${{ env.OP_VERSION }}_s905d_k${{ env.N1_KERNEL }}_*.img.gz —— 内核 ${{ env.N1_KERNEL }}（flippy），晶晨宝盒可在线升级
           * x86: immortalwrt_${{ env.OP_VERSION }}_x86_64_k${{ env.X86_KERNEL }}_*.img.gz —— 内核 ${{ env.X86_KERNEL }}（ImmortalWrt），UEFI 引导
           * armvirt: immortalwrt_${{ env.OP_VERSION }}_armv8_k${{ env.ARMVIRT_KERNEL }}_*.img.gz —— 内核 ${{ env.ARMVIRT_KERNEL }}（ImmortalWrt），ARM64 UEFI，适配 UTM/QEMU（Apple Silicon）
@@ -390,8 +417,8 @@ jobs:
         make_latest: false
         files: n1-only/*.img.gz
         body: |
-          ImmortalWrt ${{ env.OP_VERSION }} · N1 内核 ${{ env.N1_KERNEL }}（flippy）—— 滚动更新的最新 N1 固件（luci-app-amlogic 在线升级源），构建于 ${{ env.FILE_DATE }}。
-          历史版本见 firmware_<日期> 标签。
+          ImmortalWrt ${{ env.OP_VERSION }} · N1 内核 ${{ env.N1_KERNEL }}（flippy）—— 滚动更新的最新 N1 固件（luci-app-amlogic 在线升级源），构建于 ${{ env.FILE_DISPLAY }}。
+          历史版本见 firmware_<日期>_<时间> 标签。
           * 基本信息
           IP: 192.168.0.4
           账户: root
