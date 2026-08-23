@@ -155,14 +155,17 @@ jobs:
         [ -d "$profile_files" ] && cp -rf "$profile_files/." openwrt/files/
         cp ${{ matrix.config }} openwrt/.config
         cat common/config.services >> openwrt/.config
-        # Enable ccache AND pin its dir to the exact absolute path actions/cache
-        # saves. Without CONFIG_CCACHE_DIR, rules.mk defaults CCACHE_DIR to
-        # $(TOPDIR)/.ccache — resolved via the $GITHUB_WORKSPACE/openwrt symlink,
-        # so it never lined up with /workdir/openwrt/.ccache and the post-step hit
-        # "Path(s) ... do(es) not exist, hence no cache is being saved" (0 s save,
-        # 0 ccache entries ever → every run cold-compiled ~92 min). rules.mk uses
-        # $(if $(CONFIG_CCACHE_DIR),...,$(TOPDIR)/.ccache), so setting it wins.
+        # Enable ccache. CONFIG_DEVEL=y is the REQUIRED master toggle: in
+        # config/Config-devel.in both CCACHE ("Use ccache" if DEVEL) and its
+        # CCACHE_DIR ("if CCACHE") are prompt-gated behind DEVEL, so without it
+        # `make defconfig` silently strips CONFIG_CCACHE=y — gcc is never wrapped
+        # as `ccache gcc`, nothing is ever cached, and every run cold-compiled
+        # ~92 min. (The prior "path does not exist" post-step warning was the same
+        # bug: ccache off → .ccache never created.) CONFIG_CCACHE_DIR pins the dir
+        # to the exact absolute path actions/cache saves; the default './.ccache'
+        # already resolves there, but pinning it is immune to any cwd change.
         {
+          echo "CONFIG_DEVEL=y"
           echo "CONFIG_CCACHE=y"
           echo 'CONFIG_CCACHE_DIR="/workdir/openwrt/.ccache"'
           # Bake the build date into VERSION_CODE (%C) so LuCI Status → Overview

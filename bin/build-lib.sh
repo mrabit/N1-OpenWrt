@@ -146,15 +146,18 @@ apply_overlay() {
     cp "$PROFILE_DIR/.config" ./.config
     cat "$COMMON_DIR/config.services" >> .config
 
-    # ccache: reuse cached object files across recompiles. Pin CCACHE_DIR to the
-    # persistent per-profile cache via CONFIG_CCACHE_DIR — a bare `export
-    # CCACHE_DIR` is NOT enough: rules.mk does `export CCACHE_DIR := $(TOPDIR)/
-    # .ccache`, and a makefile `:=` assignment overrides an inherited env var, so
-    # the shell export was silently ignored and ccache wrote into the (wiped-on-
-    # clean-build) tree instead of the persistent cache. rules.mk honours
-    # CONFIG_CCACHE_DIR when set: $(if $(CONFIG_CCACHE_DIR),...,$(TOPDIR)/.ccache).
+    # ccache: reuse cached object files across recompiles. CONFIG_DEVEL=y is the
+    # REQUIRED master toggle — in config/Config-devel.in CCACHE ("Use ccache" if
+    # DEVEL) and CCACHE_DIR ("if CCACHE") are prompt-gated behind DEVEL, so without
+    # it `make defconfig` silently strips CONFIG_CCACHE=y and ccache is never used.
+    # Then pin CCACHE_DIR to the persistent per-profile cache via CONFIG_CCACHE_DIR:
+    # a bare `export CCACHE_DIR` is NOT enough — rules.mk does `export CCACHE_DIR :=
+    # $(TOPDIR)/.ccache`, and a makefile `:=` assignment overrides an inherited env
+    # var, so the shell export was ignored and ccache wrote into the (wiped-on-clean-
+    # build) tree. rules.mk honours CONFIG_CCACHE_DIR: $(if $(CONFIG_CCACHE_DIR),...).
     export CCACHE_DIR
     cat >> .config <<EOF
+CONFIG_DEVEL=y
 CONFIG_CCACHE=y
 CONFIG_CCACHE_DIR="$CCACHE_DIR"
 EOF
