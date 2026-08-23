@@ -36,13 +36,15 @@ LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `common/
 
 脚本会克隆 ImmortalWrt、跑对应的 `diy.sh`、铺上共享 overlay + profile 的 config 并编译。N1 产物在编译后经 ophub 打包为 `*.img.gz`；x86、armvirt 直接产出可引导的 `*-generic-squashfs-combined-efi.img.gz`。
 
-**最终可刷写镜像**（三个 profile 都）落到仓库根的 `dist/`（已 git-ignore）：N1 由 `package.sh` 移入，x86/armvirt 的 combined-efi 由各自的 `build-*.sh` 拷入。两者都会重命名为统一格式 `immortalwrt_<op版本>_<平台>_k<内核号>_<日期>.img.gz`（op 版本从构建产物 `include/version.mk` 的 `VERSION_NUMBER` 读取并剥离 `-SNAPSHOT`，如 `25.12-SNAPSHOT` → `25.12`；上游打出正式补丁号 `25.12.1` 时自动跟随）：
+**最终可刷写镜像**（三个 profile 都）落到仓库根的 `dist/`（已 git-ignore）：N1 由 `package.sh` 移入，x86/armvirt 的 combined-efi 由各自的 `build-*.sh` 拷入。两者都会重命名为统一格式 `immortalwrt_<op版本>_<平台>_k<内核号>_<日期>_<时间>.img.gz`（op 版本从构建产物 `include/version.mk` 的 `VERSION_NUMBER` 读取并剥离 `-SNAPSHOT`，如 `25.12-SNAPSHOT` → `25.12`；上游打出正式补丁号 `25.12.1` 时自动跟随。`<时间>` 为 `HHMMSS`，精确到秒）：
 
 ```
-N1:      immortalwrt_25.12_s905d_k6.12.48_2026.08.21.img.gz
-x86:     immortalwrt_25.12_x86_64_k6.12.103_2026.08.21.img.gz
-armvirt: immortalwrt_25.12_armv8_k6.12.103_2026.08.21.img.gz
+N1:      immortalwrt_25.12_s905d_k6.12.48_2026.08.21_143005.img.gz
+x86:     immortalwrt_25.12_x86_64_k6.12.103_2026.08.21_143005.img.gz
+armvirt: immortalwrt_25.12_armv8_k6.12.103_2026.08.21_143005.img.gz
 ```
+
+同一次构建的三个 profile 共用同一个时间戳（CI 里在 `setup` 阶段统一生成，本地各脚本自行生成），GitHub release 的 tag（`firmware_<日期>_<时间>`）也精确到秒，因此每次构建都是独立、不覆盖的 release。
 
 N1 保留 `s905d_k6.12.NN` 段供晶晨宝盒 OTA 识别（内核为 ophub/flippy 版），x86/armvirt 内核号取自编译产物 `.manifest`（ImmortalWrt 官方编译），与 N1 内核不同源。完整的中间产物（整个 `bin/targets`）另外输出到原生盘（N1 与 armvirt 同为 `armsr/armv8` target，`build.sh` 全跑时该目录只留最后一个 profile 的中间产物，但各自最终镜像都已落到 `dist/`）：
 
