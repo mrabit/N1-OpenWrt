@@ -12,6 +12,12 @@ dns:
   bootstrap_dns:
     - 223.5.5.5
     - 119.29.29.29
+  # 旁路由禁 IPv6(AAAA) 解析：本机只做 IPv4 旁路代理，放行 AAAA 会让客户端走
+  # IPv6 直连绕过 PassWall，且部分 IPv6 路径不通。与真机 0.4 部署一致。
+  aaaa_disabled: true
+  # DNSSEC 关：上游是 chinadns-ng(:15353) 分流到国内 DNS + 代理，多数国内 DNS 不透传
+  # DNSSEC 签名记录，开了验签会失败导致解析不了。旁路由 + 国内分流场景刻意关闭。
+  enable_dnssec: false
 filters:
   - enabled: true
     url: https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
@@ -41,6 +47,9 @@ user_rules:
   - '||bjango.com^'
   - '||checkout.paddle.com^'
 filtering:
+  # 拦截模式=空IP：被拦域名统一返回 0.0.0.0(A)/::（AAAA），直接让连接失败。
+  # 与真机 0.4 部署一致（默认 default 会返回规则指定 IP 或 0.0.0.0）。
+  blocking_mode: null_ip
   # DNS 重写示例：将内部/自建服务域名指向局域网 IP。
   # 按实际部署替换 domain 与 answer，可增删条目。
   rewrites:

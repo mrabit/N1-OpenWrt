@@ -54,10 +54,14 @@ if [ -f /etc/config/firewall ]; then
 	uci -q set firewall.@zone[0].input='ACCEPT'
 	uci -q set firewall.@zone[0].output='ACCEPT'
 	uci -q set firewall.@zone[0].forward='ACCEPT'
-	# 单臂旁路由：本机无 wan 口，直连（不走代理）的流量从 br-lan 转发回主路由时
-	# 默认不做 SNAT，回程非对称、部分主路由直接丢包 → 国内 IPv4 直连站点收不到回包。
-	# lan zone 开 masq 让直连流量经 N1 做 SNAT，回程对称经过本机。
-	uci -q set firewall.@zone[0].masq='1'
+	# 单臂旁路由 lan zone masq：按设备区分（实测 2026-08）。
+	# N1 必须开 masq=1，否则国内直连站点访问不了；x86/armvirt 必须关，
+	# 开了反而访问不了。用 /etc/config/amlogic 判定 N1（仅 N1 有）。
+	if [ -f /etc/config/amlogic ]; then
+		uci -q set firewall.@zone[0].masq='1'
+	else
+		uci -q set firewall.@zone[0].masq='0'
+	fi
 	uci -q set firewall.@defaults[0].flow_offloading='1'
 	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 	uci -q set firewall.@defaults[0].fullcone='0'
@@ -144,14 +148,21 @@ if [ -f /etc/config/passwall ]; then
 	uci -q set passwall.@global[0].dns_shunt='chinadns-ng'
 	uci -q set passwall.@global[0].dns_mode='tcp'
 	uci -q set passwall.@global[0].use_default_dns='direct'
-	uci -q set passwall.@global[0].china_dns='223.5.5.5:53'
+	# 国内(直连)DNS：新版字段名是 direct_dns，旧的 china_dns 已废弃(app.sh 不再读)。
+	uci -q set passwall.@global[0].direct_dns='223.5.5.5:53'
 	uci -q set passwall.@global[0].localhost_proxy='1'
 	uci -q set passwall.@global[0].use_ipv6='0'
 	uci -q set passwall.@global[0].filter_proxy_ipv6='1'
+	# 代理模式 = GFW 列表：仅命中 GFW 列表的域名走代理，其余（含国内）直连。
+	# 对应 LuCI「切换模式」的 GFW List 按钮 (switch_gfw_mode): use_gfw_list=1 +
+	# chn_list=0 + tcp/udp_proxy_mode=disable。这四项运行时都从 @global[0] 读取
+	# (app.sh: config_t_get global …)，写到 @global_forwarding[0] 不生效。
+	uci -q set passwall.@global[0].use_gfw_list='1'
+	uci -q set passwall.@global[0].chn_list='0'
+	uci -q set passwall.@global[0].tcp_proxy_mode='disable'
+	uci -q set passwall.@global[0].udp_proxy_mode='disable'
 	uci -q set passwall.@global_forwarding[0].ipv6_tproxy='0'
 	uci -q set passwall.@global_forwarding[0].accept_icmpv6='0'
-	uci -q set passwall.@global_forwarding[0].tcp_proxy_mode='proxy'
-	uci -q set passwall.@global_forwarding[0].udp_proxy_mode='proxy'
 	uci -q set passwall.@global_forwarding[0].udp_proxy_drop_ports='443'
 	uci -q set passwall.@global_forwarding[0].udp_redir_ports='1:65535'
 	uci -q set passwall.@global_forwarding[0].tcp_redir_ports='22,25,53,80,143,443,465,587,853,873,993,995,5222,8080,8443,9418'
