@@ -35,3 +35,19 @@ if grep -q 'wget .*releases/download' "$et_mk"; then
 else
 	echo "WARN: easytier Makefile has no wget release-download line — upstream changed it, skipping curl swap." >&2
 fi
+
+# Drop two conflicting FMSH SPI-NAND backport patches (upstream regression, 2026-08-24).
+# ImmortalWrt's "Merge Official Source" pulled mainline backports 436/437 (add
+# FM25G{01,02}B support) on top of its own Rockchip-based hack-6.12/400 fmsh.c, whose
+# layout differs — 436 Hunk #1 can't find its anchor (FM25S01BI3_STATUS_ECC_MASK),
+# so `make defconfig`/kernel-headers dies applying it (world Error 2). FMSH SPI-NAND
+# is used by NONE of our profiles (N1 eMMC, x86, armvirt), so dropping both is safe.
+# Idempotent (rm -f). Remove this block once upstream reconciles 400 with 436/437.
+for p in 436-v7.3-mtd-spinand-fmsh-add-support-for-FM25G01B-FM25G02B \
+	437-v7.3-mtd-spinand-fmsh-fix-FM25G01B-FM25G02B-Quad-IO-read-dummy-cycles; do
+	f="target/linux/generic/backport-6.12/${p}.patch"
+	if [ -f "$f" ]; then
+		rm -f "$f"
+		echo "INFO: dropped conflicting FMSH backport patch: $p" >&2
+	fi
+done

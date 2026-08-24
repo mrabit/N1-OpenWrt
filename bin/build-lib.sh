@@ -55,7 +55,15 @@ derive_op_version() {
 # BUILD_ROOT must be a native fs: OpenWrt's tree has huge numbers of small
 # parallel writes and hardlinks that corrupt on a virtiofs/macOS bind mount.
 check_buildroot_fs() {
-    mkdir -p "$BUILD_ROOT"
+    # BUILD_ROOT may live under a root-owned parent (e.g. /opt). Try a plain
+    # mkdir first; only if that fails fall back to a one-time sudo mkdir+chown so
+    # the tree ends up owned by us and no later step needs privilege.
+    if ! mkdir -p "$BUILD_ROOT" 2>/dev/null; then
+        echo "INFO: $BUILD_ROOT not writable; creating it once via sudo..." >&2
+        sudo mkdir -p "$BUILD_ROOT" \
+            && sudo chown "$(id -u):$(id -g)" "$BUILD_ROOT" \
+            || { echo "ERROR: failed to create $BUILD_ROOT (sudo needed)." >&2; exit 1; }
+    fi
     fstype="$(stat -f -c '%T' "$BUILD_ROOT")"
     case "$fstype" in
         virtiofs|fuseblk|nfs|cifs|9p)
@@ -76,19 +84,37 @@ check_disk() {
     fi
 }
 
-# N1 hard-requires the external Go bootstrap (arm64 can't build Go from source);
-# x86 only uses it if present. Only called with a hard requirement by N1.
+# N1/armvirt hard-require the external Go bootstrap (arm64 can't build Go from
+# source); x86 only uses it if present. When missing, auto-install a prebuilt Go
+# to $GO_BOOTSTRAP (needs sudo to write under /usr/local; asks once).
+: "${GO_BOOTSTRAP_VERSION:=1.24.9}"
 check_go_bootstrap() {
+    if [ -x "$GO_BOOTSTRAP/bin/go" ]; then
+        return 0
+    fi
+    echo "INFO: Go bootstrap missing at $GO_BOOTSTRAP; installing go$GO_BOOTSTRAP_VERSION via sudo..." >&2
+    local arch tarball tmp
+    arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+    case "$arch" in
+        aarch64) arch=arm64 ;;
+        x86_64)  arch=amd64 ;;
+    esac
+    tarball="go${GO_BOOTSTRAP_VERSION}.linux-${arch}.tar.gz"
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL --proxy "$ALL_PROXY" "https://go.dev/dl/${tarball}" -o "$tmp/$tarball"; then
+        echo "ERROR: failed to download https://go.dev/dl/${tarball} via $ALL_PROXY." >&2
+        rm -rf "$tmp"; exit 1
+    fi
+    sudo rm -rf "$GO_BOOTSTRAP" \
+        && sudo mkdir -p "$GO_BOOTSTRAP" \
+        && sudo tar -C "$GO_BOOTSTRAP" --strip-components=1 -xzf "$tmp/$tarball" \
+        || { echo "ERROR: failed to install Go bootstrap to $GO_BOOTSTRAP." >&2; rm -rf "$tmp"; exit 1; }
+    rm -rf "$tmp"
     if [ ! -x "$GO_BOOTSTRAP/bin/go" ]; then
-        echo "ERROR: Go bootstrap not found at $GO_BOOTSTRAP/bin/go." >&2
-        echo "       Install a prebuilt Go there, e.g.:" >&2
-        echo "         arch=\$(dpkg --print-architecture)" >&2
-        echo "         curl -fsSL --proxy \"$ALL_PROXY\" \\" >&2
-        echo "           https://go.dev/dl/go1.24.9.linux-\${arch}.tar.gz | \\" >&2
-        echo "           sudo tar -C /usr/local -xzf - && \\" >&2
-        echo "         sudo mv /usr/local/go $GO_BOOTSTRAP" >&2
+        echo "ERROR: Go bootstrap install completed but $GO_BOOTSTRAP/bin/go is missing." >&2
         exit 1
     fi
+    echo "INFO: installed $("$GO_BOOTSTRAP/bin/go" version) at $GO_BOOTSTRAP" >&2
 }
 
 # Install any missing apt dependencies up front via build-deps.sh (it handles
