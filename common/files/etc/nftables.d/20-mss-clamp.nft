@@ -1,0 +1,22 @@
+# 单臂旁路由 MSS clamp（固定低值）——2026-08 用户主动选择「盲加兜底」(B 方案)。
+#
+# fw4 自动 include /etc/nftables.d/*.nft 到 `table inet fw4 {}` 内部（链定义区），
+# 所以这里只写 chain，不要包 table。语法错误会导致整个 fw4 加载失败、防火墙起不来，
+# 改动后务必真机验证（见文末命令）。
+#
+# 作用域 & 局限（重要，别误解）：
+# - 只命中 **forward** 链 = 直连流量（client → 本机 br-lan → 主网关 → 直连出海）。
+#   目的：主路由若是 PPPoE(1492) 或本身是隧道/VPN 出口(MTU<1500)，client 发的
+#   MSS 1460 大包到主网关会二次分片 → 乱序/重传/网页转圈。这里提前把 forward 的
+#   TCP SYN MSS 压到 1400，避免分片。
+# - **代理流量帮不到**：PassWall tproxy 在 PREROUTING 就把包截给本机 sing-box 重发，
+#   走本机 output 不经 forward；代理段的 MSS 由出口 socks(192.168.0.8) 那端与真实
+#   对端协商，N1 侧无法干预，所以不在这条规则内。
+# - 仅当现有 MSS > 1400 才下压(size 1401-65535)，避免把本就小的段改大/乱动。
+# - 若主网关全程 1500、无隧道：这条会把 1460 无谓压到 1400（约 -4% payload），
+#   属纯损失 —— 那种环境删掉本文件即可（不影响连通，只恢复效率）。
+
+chain mss_clamp_fwd {
+	type filter hook forward priority -150; policy accept;
+	tcp flags syn / syn,rst tcp option maxseg size 1401-65535 tcp option maxseg size set 1400 counter comment "bypass-router: clamp direct-forward MSS to 1400"
+}
