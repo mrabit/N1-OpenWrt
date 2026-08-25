@@ -4,7 +4,7 @@
 
 - **N1**（`armsr/armv8/N1`）：斐讯 N1（Amlogic S905D），经 ophub/flippy 打包为可刷写的 `*.img.gz`，含 [luci-app-amlogic](https://github.com/ophub/luci-app-amlogic)（晶晨宝盒）在线升级；板载 WiFi 默认开放 AP `N1-OpenWrt` 桥接进 LAN。
 - **x86**（`x86/64`）：x86/64 通用机型（软路由/虚拟机），OpenWrt 直接产出可 UEFI 引导的 combined-efi 镜像，无需 ophub 二次打包，也不含 luci-app-amlogic。
-- **armvirt**（`armsr/armv8/armvirt`）：ARM64 通用虚拟机（Apple Silicon 上的 UTM/QEMU，或任意 EDK2/UEFI aarch64 hypervisor）。与 N1 同 `armsr/armv8` target，但走 x86 那套流程直接产出可 UEFI 引导的 combined-efi 镜像（无 ophub、无 amlogic、无板载 WiFi，物理网卡 kmod 换 virtio）。
+- **armvirt**（`armsr/armv8/armvirt`）：ARM64 通用虚拟机（Apple Silicon 上的 UTM/QEMU，或任意 EDK2/UEFI aarch64 hypervisor）。与 N1 同 `armsr/armv8` target，但走 x86 那套流程直接产出可 UEFI 引导的 combined-efi 镜像（无 ophub、无 amlogic、无板载 WiFi）。virtio（BLK/NET/CONSOLE/PCI/MMIO）在 armsr 内核里已是 builtin，故 `.config` 里**无** kmod-virtio 包，镜像无需 initramfs 即可挂载 virtio 根/网卡。
 
 三种 profile 共享同一套旁路由服务与 overlay（见 `common/`），只有 target/rootfs/打包流程不同。
 
@@ -14,14 +14,16 @@
 - AdGuardHome：DNS 过滤
 - SNMP（snmpd）：监控
 - KMS（vlmcsd）：激活服务
-- EasyTier（luci-app-easytier）：异地组网（节点名/密钥等敏感信息留刷机后在 LuCI 配置）
+- EasyTier（luci-app-easytier）：异地组网（节点名/密钥等敏感信息留刷机后在 LuCI 配置）。首启已预置插件自己的 `et_forward='etfwlan lanfwet'`，一旦在 LuCI 配好组网并 `enabled`，插件会自动建两条跨区转发：`EasyTier→lan`（远端节点访问本机 LAN 设备，缺它则 ping 通但 TCP 建连被 drop）与 `lan→EasyTier`（LAN 客户端经本机访问 EasyTier 代理子网）。
 - （仅 N1）luci-app-amlogic：系统更新、内核更新、CPU 调频等
 
-首启会通过 `etc/uci-defaults/99-bypass-router` 自动完成旁路由基础设置：关闭 DHCP/DHCPv6、开启 IPv4 转发、启用软件流量卸载（S905D 无硬件 offload，硬件卸载与 fullcone NAT 均关闭以免 firewall4 加载失败）、设置时区（Asia/Shanghai）与国内 NTP 服务器。amlogic 配置、LAN masquerade 等按设备差异的项，均按是否存在 `/etc/config/amlogic`（仅 N1 有）自动判定，x86/armvirt 上自动处理。
+首启会通过 `etc/uci-defaults/99-bypass-router` 自动完成旁路由基础设置：关闭 DHCP/DHCPv6、开启 IPv4 转发、启用软件流量卸载（S905D 无硬件 offload，硬件卸载与 fullcone NAT 均关闭以免 firewall4 加载失败）、设置时区（Asia/Shanghai）。NTP 服务器**不在此设**——ImmortalWrt 自带的 `99-default-settings-chinese` 排在本脚本之后、会覆盖成它的国内 NTP 列表，故直接沿用其列表。amlogic 配置、LAN masquerade 等按设备差异的项，均按是否存在 `/etc/config/amlogic`（仅 N1 有）自动判定，x86/armvirt 上自动处理。
 
-AdGuardHome 预置为旁路由场景做了三项 DNS 调整（`common/files/etc/adguardhome/adguardhome.yaml`）：禁 AAAA/IPv6 解析（`aaaa_disabled`，避免客户端走 IPv6 直连绕过 PassWall）、关 DNSSEC 验签（`enable_dnssec: false`，上游国内 DNS 分流多不透传 DNSSEC，开了会解析失败）、拦截模式设为空 IP（`blocking_mode: null_ip`，被拦域名返回 `0.0.0.0`/`::` 直接让连接失败）。
+AdGuardHome 预置为旁路由场景做了若干调整（`common/files/etc/adguardhome/adguardhome.yaml`）。DNS 分流相关三项：禁 AAAA/IPv6 解析（`aaaa_disabled`，避免客户端走 IPv6 直连绕过 PassWall）、关 DNSSEC 验签（`enable_dnssec: false`，上游国内 DNS 分流多不透传 DNSSEC，开了会解析失败）、拦截模式设为空 IP（`blocking_mode: null_ip`，被拦域名返回 `0.0.0.0`/`::` 直接让连接失败）。路由加固四项：关限速（`ratelimit: 0`，默认每客户端 IP 20 q/s 会误伤繁忙浏览器/下游转发）、回退 DNS（`fallback_dns: 223.5.5.5 / 119.29.29.29`，仅当唯一上游 `127.0.0.1:15353` 挂掉时兜底解析国内域名）、查询日志不落盘（`querylog.file_enabled: false` + `interval: 24h`，日志只留内存，避免 eMMC/SSD 写放大）、统计聚合周期缩到 `24h`（`statistics.interval`）。
 
-LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `common/files/etc/config/network` 调整，两 profile 共用）。
+LAN 默认地址 `192.168.0.4/24`，网关 `192.168.0.1`（可按需在 `common/files/etc/config/network` 调整，三个 profile 共用）。
+
+另有一条 MSS 钳制规则（`common/files/etc/nftables.d/20-mss-clamp.nft`）：对**直连转发**的 TCP SYN，把 MSS > 1400 的钳到 1400，避免 PPPoE/隧道主网关（MTU < 1500）对客户端 1460 字节包再分片导致乱序/重传/卡顿。仅覆盖直连转发流量，PassWall 代理流量不受影响（tproxy 在 PREROUTING 改道本地 sing-box 重新发起，走 output 而非 forward）。若主网关全 1500、无隧道，这条会白白削掉约 4% 载荷，删文件即可恢复（不影响连通性）。
 
 ## 本地构建
 
@@ -59,15 +61,15 @@ N1 保留 `s905d_k6.12.NN` 段供晶晨宝盒 OTA 识别（内核为 ophub/flipp
 
 重复执行即可重新生成镜像。构建缓存（源码下载 `dl/`、feeds、ccache）都在 `BUILD_ROOT/cache` 下，重复构建会复用。
 
-前置依赖（Ubuntu/Debian）—— 与 CI 共用同一个脚本 `bin/build-deps.sh`：
+前置依赖（Ubuntu/Debian）**无需手动装**：`bin/build.sh` 编译前会自动检测缺失的 apt 包并调 `bin/build-deps.sh` 装齐（该脚本与 CI 共用同一份包列表）。也可手动预装：
 
 ```bash
 sudo ./bin/build-deps.sh
 ```
 
-**N1 和 armvirt 另需**一份预编译 Go 作为外部 bootstrap（OpenWrt Go ≥1.26 需要 ≥1.24.6 的 bootstrap，本地 arm64 host 上不能从源码起），装到 `/usr/local/go-bootstrap`（`GO_BOOTSTRAP`）。脚本检测不到时会打印安装命令。x86 可从源码起 Go，`GO_BOOTSTRAP` 存在则复用、缺失也不强制。（CI 用 x86_64 runner 交叉编译，能从源码起 Go，故无需 bootstrap。）
+**N1 和 armvirt 另需**一份预编译 Go 作为外部 bootstrap（OpenWrt Go ≥1.26 需要 ≥1.24.6 的 bootstrap，本地 arm64 host 上不能从源码起），装到 `/usr/local/go-bootstrap`（`GO_BOOTSTRAP`）。这个也**自动处理**：检测不到时脚本会按架构从 `go.dev` 下载预编译 Go 并 `sudo` 装到该目录（需能连 go.dev / 走 `ALL_PROXY`）。x86 可从源码起 Go，`GO_BOOTSTRAP` 存在则复用、缺失也不强制。（CI 用 x86_64 runner 交叉编译，能从源码起 Go，故无需 bootstrap。）
 
-常用覆盖项（对两个 profile 通用）：
+常用覆盖项（对三个 profile 通用）：
 
 ```bash
 BUILD_ROOT=/mnt/ssd/owrt ./bin/build.sh x86       # 换构建盘

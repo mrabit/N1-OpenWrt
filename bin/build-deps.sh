@@ -6,7 +6,8 @@
 #   sudo ./bin/build-deps.sh
 #
 # Or source it to reuse the list without installing (bin/build.sh does this for
-# its missing-package check, and CI reads $BUILD_DEPS too):
+# its missing-package check). CI instead executes this script directly
+# (.github/workflows/build.yml: `sudo -E bin/build-deps.sh`) to install everything.
 #   source bin/build-deps.sh   # populates $BUILD_DEPS
 
 BUILD_DEPS=(

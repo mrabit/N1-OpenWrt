@@ -67,28 +67,23 @@ if [ -f /etc/config/firewall ]; then
 	uci -q set firewall.@defaults[0].fullcone='0'
 	uci -q set firewall.@defaults[0].fullcone6='0'
 
-	# lan → EasyTier 转发放行。easytier 插件的 auto_config_firewall 只建了 EasyTier
-	# zone(masq)和 tun0 的 accept，漏了 lan→EasyTier 的跨区转发，导致局域网机器
-	# 经本机访问 easytier 代理子网(如 192.168.4.0/24)时被 forward 链 drop、回 icmp
-	# port-unreachable。这里补上;fw4 会忽略指向未建 zone 的 forwarding，故 easytier
-	# 未启用时加了也无害，插件建好 EasyTier zone 后自动生效。幂等：已存在则跳过。
-	et_fwd_exists=0
-	i=0
-	while uci -q get firewall.@forwarding[$i] >/dev/null 2>&1; do
-		if [ "$(uci -q get firewall.@forwarding[$i].src)" = "lan" ] && \
-		   [ "$(uci -q get firewall.@forwarding[$i].dest)" = "EasyTier" ]; then
-			et_fwd_exists=1
-			break
-		fi
-		i=$((i + 1))
-	done
-	if [ "$et_fwd_exists" = "0" ]; then
-		s="$(uci add firewall forwarding)"
-		uci -q set firewall."$s".src='lan'
-		uci -q set firewall."$s".dest='EasyTier'
-	fi
-
 	uci -q commit firewall
+fi
+
+# EasyTier 跨区转发：预设插件自己的 et_forward，让 easytier 管理防火墙转发规则，而不是
+# 我们手工建 firewall.forwarding。luci-app-easytier 自带的 /etc/config/easytier 默认
+# auto_config_firewall='1' 但 et_forward 为空 —— 它的 init.d(set_firewall)只建 EasyTier
+# zone(masq)+tun0 accept，两个跨区 forwarding 都不建。预设 'etfwlan lanfwet' 后，用户在
+# LuCI 配好组网、enabled='1' 时,set_firewall 按 et_forward 建两条具名规则:
+#   etfwlan → EasyTier→lan：easytier 节点访问本机 LAN 设备(如 192.168.0.5:22)。缺这条时
+#             ping 通(icmp 走 easytier 用户态栈)但 tcp 建连被 forward 链 drop(实测 2026-08)。
+#   lanfwet → lan→EasyTier：局域网机器经本机访问 easytier 代理子网(如 192.168.4.0/24)。
+# 规则生命周期完全由插件接管(每次启动按 et_forward set/删同名 section)，故这里只设值、不建
+# firewall 规则,避免和插件重复;LuCI 的 Access Control 也会显示成已勾选,界面自洽。enabled=0
+# (未配组网)时 easytier 不启动、无 EasyTier zone,本就不需要规则,故无"空窗期"损失。
+if [ -f /etc/config/easytier ]; then
+	uci -q set easytier.@easytier[0].et_forward='etfwlan lanfwet'
+	uci -q commit easytier
 fi
 
 sed -i '/^net.ipv4.ip_forward=/d' /etc/sysctl.conf 2>/dev/null || true
