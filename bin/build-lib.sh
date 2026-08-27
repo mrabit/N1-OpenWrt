@@ -19,8 +19,13 @@
 # optional on x86 (which can build Go from source).
 : "${GO_BOOTSTRAP:=/usr/local/go-bootstrap}"
 # Outbound proxy; go.dev / some feeds are unreachable directly here.
-# socks5h keeps DNS resolution on the proxy side.
-: "${ALL_PROXY:=socks5h://192.168.0.8:1180}"
+# socks5h keeps DNS resolution on the proxy side. Single-dash `=` (not `:=`):
+# unset -> local socks5 default; explicitly empty (ALL_PROXY= from CI) -> stay
+# empty = direct connect. `:=` would clobber the CI empty back to the socks
+# default, which CI can't reach — that broke N1 packaging (git clone ophub
+# stalled on the unreachable socks). package.sh sources this then repeats the
+# same single-dash default, so both agree on "empty means direct".
+: "${ALL_PROXY=socks5h://192.168.0.8:1180}"
 : "${JOBS:=$(nproc)}"
 # Where the finished firmware is copied. Defaults to the native scratch volume
 # to keep the repo (often a slow virtiofs mount) clean; override to taste.
