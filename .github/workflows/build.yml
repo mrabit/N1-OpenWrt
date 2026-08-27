@@ -233,17 +233,22 @@ jobs:
         mkdir -p /workdir/openwrt/.ccache
         echo -e "$(nproc) thread compile"
         make -j$(( $(nproc) + 1 )) || make -j1 V=s
-    - name: Package N1 firmware (ophub)
+    - name: Package N1 firmware
       if: matrix.profile == 'N1'
-      uses: ophub/amlogic-s9xxx-openwrt@main
-      with:
-        openwrt_path: openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
-        openwrt_board: s905d
-        kernel_repo: ophub/kernel
-        kernel_usage: flippy
-        openwrt_kernel: 6.12.y
-        openwrt_size: 256/1024
-        builder_name: mrabit
+      # Was the ophub/amlogic-s9xxx-openwrt@main Action, but that's a black box:
+      # it re-clones ophub internally and runs remake, so it never sees our
+      # openwrt-install-amlogic patch (the one that stops ophub's emmc installer
+      # deleting AdGuardHome — see CLAUDE.md "AGH-on-emmc"). Call bin/package.sh
+      # instead — the same script local builds use — so CI and local package
+      # identically and the patch actually applies. It clones ophub@main to
+      # $BUILD_ROOT/ophub, patches remake + openwrt-install-amlogic, runs remake,
+      # and drops the renamed *.img.gz into dist/ (Collect firmware picks it up).
+      env:
+        OUTDIR: ${{ github.workspace }}          # holds openwrt/bin/targets/...
+        BUILD_ROOT: /workdir                       # native ext4, same vol as build
+        ALL_PROXY: ''                              # CI has direct internet, no socks
+        BUILD_STAMP: ${{ needs.setup.outputs.build_stamp }}  # shared with x86/armvirt
+      run: bin/package.sh
 
     - name: Collect firmware
       run: |
@@ -269,22 +274,22 @@ jobs:
         imgstamp="${{ needs.setup.outputs.build_stamp }}"
         case "${{ matrix.profile }}" in
         N1)
-          # ophub exports PACKAGED_OUTPUTPATH with the flashable *.img.gz.
-          src="$(ls "$PACKAGED_OUTPUTPATH"/*.img.gz | head -1)"
-          base="$(basename "$src")"
-          bk="$(echo "$base" | grep -oE 's905d_k[0-9]+\.[0-9]+\.[0-9]+' || true)"
-          if [ -z "$bk" ]; then
-            echo "ERROR: could not parse s905d_k<kernel> from ophub name '$base' —" >&2
-            echo "       OTA needs it and the naming scheme requires it." >&2
+          # bin/package.sh already did the full N1 finish: parsed s905d_k<kernel>,
+          # applied BUILD_STAMP (the shared setup stamp, passed in above), renamed to
+          # the unified scheme, and recompressed with `gzip -n` (resets the stale
+          # FNAME header) into the repo's dist/. So there's nothing to rename or
+          # recompress here — just move the finished image into out/. OP_VERSION and
+          # imgstamp are already baked into the dist/ filename by package.sh, so this
+          # branch doesn't use them (the x86/armvirt branch still does).
+          # 2>/dev/null || true so a no-match ls (exit 2) doesn't trip set -e
+          # before the friendly check below (mirrors the x86/armvirt branch).
+          src="$(ls dist/immortalwrt_*_s905d_*.img.gz 2>/dev/null | head -1)" || true
+          if [ -z "${src:-}" ]; then
+            echo "ERROR: bin/package.sh produced no s905d image in dist/; contents:" >&2
+            ls -la dist/ >&2 || true
             exit 1
           fi
-          # Recompress instead of cp: ophub's gzip stored the pre-rename name
-          # (openwrt_amlogic_...) in the FNAME header, so `gunzip -N`/GUI tools
-          # would decompress our renamed .gz to the stale name. `gzip -n` writes
-          # no name/mtime, so extraction falls back to stripping .gz and matches
-          # the shell (same as x86/armvirt, which store no FNAME). gzip -dc (not zcat:
-          # BSD zcat only groks .Z) for portability.
-          gzip -dc "$src" | gzip -n > "$out/immortalwrt_${OP_VERSION}_${bk}_${imgstamp}.img.gz"
+          cp -v "$src" "$out/"
           ;;
         x86|armvirt)
           # x86 and armvirt both emit a bootable EFI combined image directly (x86/64

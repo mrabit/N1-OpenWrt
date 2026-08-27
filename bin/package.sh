@@ -20,12 +20,28 @@ source "$SCRIPT_DIR/build-lib.sh"
 
 # --- tunables ----------------------------------------------------------------
 # BUILD_ROOT / REPO_BRANCH defaults come from build-lib.sh. Package-only extras:
-# Outbound proxy for ophub kernel fetches.
-: "${ALL_PROXY:=socks5h://192.168.0.8:1180}"
+# Outbound proxy for ophub kernel fetches. Single-dash default: unset -> local
+# socks5; explicitly empty (ALL_PROXY= from CI) -> stay empty = direct connect
+# (CI has internet and can't reach that socks). Empty-safe below: proxy env/git
+# config are only applied when non-empty.
+: "${ALL_PROXY=socks5h://192.168.0.8:1180}"
 : "${OPHUB_REPO:=https://github.com/ophub/amlogic-s9xxx-openwrt}"
 
-OUTDIR="$BUILD_ROOT/build"
+# OUTDIR is the openwrt tree's parent (holds openwrt/bin/targets/...). Defaults to
+# the local scratch tree; the CI workflow overrides it to $GITHUB_WORKSPACE (where
+# it compiled) so this same script packages CI builds too — replacing the ophub
+# GitHub action, which is a black box that re-clones ophub internally and so can't
+# see our openwrt-install-amlogic patch. OPHUB_DIR stays under BUILD_ROOT.
+: "${OUTDIR:=$BUILD_ROOT/build}"
 OPHUB_DIR="$BUILD_ROOT/ophub"
+
+# Image stamp (dotted date + _HHMMSS, no ':', git/filename-safe). The CI workflow
+# overrides it with the ONE stamp minted in the setup job (needs.setup.outputs.
+# build_stamp) so all three profiles' images — and the release tag derived from
+# them — agree to the second. Locally there's no setup job, so mint it now
+# (build/package time). Must be resolved ONCE here, not per-image in the loop
+# below, or two N1 images in one run would disagree.
+: "${BUILD_STAMP:=$(date '+%Y.%m.%d_%H%M%S')}"
 
 # --- sanity checks -----------------------------------------------------------
 if [ ! -d "$OUTDIR/openwrt" ]; then
@@ -42,10 +58,14 @@ if ! sudo -n true 2>/dev/null; then
 fi
 
 # --- proxy -------------------------------------------------------------------
-export ALL_PROXY HTTP_PROXY="$ALL_PROXY" HTTPS_PROXY="$ALL_PROXY"
-export http_proxy="$ALL_PROXY" https_proxy="$ALL_PROXY" all_proxy="$ALL_PROXY"
-git config --global http.proxy "$ALL_PROXY"
-git config --global https.proxy "$ALL_PROXY"
+# Only wire up the proxy when non-empty. CI passes ALL_PROXY= (direct); setting
+# git http.proxy to an empty string would break clones there.
+if [ -n "$ALL_PROXY" ]; then
+    export ALL_PROXY HTTP_PROXY="$ALL_PROXY" HTTPS_PROXY="$ALL_PROXY"
+    export http_proxy="$ALL_PROXY" https_proxy="$ALL_PROXY" all_proxy="$ALL_PROXY"
+    git config --global http.proxy "$ALL_PROXY"
+    git config --global https.proxy "$ALL_PROXY"
+fi
 
 echo "Repackaging N1 firmware"
 echo "  rootfs:    $OUTDIR/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz"
@@ -96,16 +116,53 @@ else
     echo "      losetup logic changed — re-check this patch." >&2
 fi
 
+# Stop ophub's installer from breaking AdGuardHome (root cause, verified on real
+# N1 2026-08-26). openwrt-install-amlogic (the 晶晨宝盒 "install to EMMC" script,
+# baked into the rootfs via remake's common-files overlay) does, while writing
+# the emmc rootfs:
+#     rm -rf usr/bin/AdGuardHome && ln -sf /mnt/${EMMC_NAME}p4/AdGuardHome usr/bin/
+# i.e. it deletes the real 32 MB binary and symlinks /usr/bin/AdGuardHome at the
+# p4 data partition — but never copies the binary into p4 (unlike docker it just
+# deletes+links). p4 is freshly formatted at install, so the link points at an
+# empty dir → init.d execve's a directory → "Permission denied" crash loop, AGH
+# never binds :53. ophub's intent ("AGH lives on the big partition") is simply
+# incomplete. We neutralise only the AGH line (leave docker's alone — we ship no
+# docker, and its handling differs); AGH's work_dir is /var/lib/adguardhome, not
+# p4, so the binary staying in /usr/bin is fully self-sufficient. Idempotent via
+# the #N1PATCH# marker; re-applied every run since the reset/clone above restores
+# the pristine file. WARN (not fail) if the anchor moves so packaging still runs.
+install_amlogic="$OPHUB_DIR/make-openwrt/openwrt-files/common-files/usr/sbin/openwrt-install-amlogic"
+agh_anchor='rm -rf usr/bin/AdGuardHome && ln -sf'
+if [ -f "$install_amlogic" ] && grep -qF "$agh_anchor" "$install_amlogic"; then
+    if ! grep -qF '#N1PATCH#' "$install_amlogic"; then
+        sed -i 's|^\([[:space:]]*\)rm -rf usr/bin/AdGuardHome && ln -sf.*|\1: #N1PATCH# AGH binary kept in rootfs; ophub'"'"'s rm+symlink-to-p4 disabled (empty p4 -> execve crash loop)|' "$install_amlogic"
+    fi
+else
+    # Not an error: ophub removed this line upstream at 6bf6c75 (the AGH rm+ln that
+    # broke emmc installs is gone from current main), so a fresh clone has nothing
+    # to patch. This branch is the expected steady state now; the patch stays only
+    # to re-neutralise the line if ophub ever brings it back.
+    echo "INFO: ophub openwrt-install-amlogic has no AGH rm+symlink line" >&2
+    echo "      (upstream removed it at 6bf6c75) — nothing to patch, AGH binary" >&2
+    echo "      stays in the rootfs as-is. If a flashed N1 later shows AGH" >&2
+    echo "      crash-looping (execve /usr/bin/AdGuardHome: Permission denied)," >&2
+    echo "      ophub reintroduced it — re-check this patch's anchor." >&2
+fi
+
 # remake reads the rootfs from ./openwrt-armsr/ (armsr/armv8 target).
 mkdir -p "$OPHUB_DIR/openwrt-armsr"
 cp "$rootfs" "$OPHUB_DIR/openwrt-armsr/"
 
 # Flags mirror the workflow: -b s905d -k 6.12.y -r ophub/kernel -u flippy
 # -s 256/1024 -n mrabit. sudo strips the environment, so re-export the proxy
-# explicitly — remake curls the flippy kernel and stalls without it.
+# explicitly — remake curls the flippy kernel and stalls without it. The proxy
+# env vars are only injected when ALL_PROXY is non-empty (${ALL_PROXY:+...}); on
+# CI (ALL_PROXY=) the whole prefix vanishes so remake connects direct, matching
+# the guarded proxy block above (empty *_proxy would just mean "no proxy" anyway,
+# but keep it consistent and clean).
 ( cd "$OPHUB_DIR" && sudo env \
-    http_proxy="$ALL_PROXY" https_proxy="$ALL_PROXY" all_proxy="$ALL_PROXY" \
-    HTTP_PROXY="$ALL_PROXY" HTTPS_PROXY="$ALL_PROXY" ALL_PROXY="$ALL_PROXY" \
+    ${ALL_PROXY:+http_proxy="$ALL_PROXY" https_proxy="$ALL_PROXY" all_proxy="$ALL_PROXY"} \
+    ${ALL_PROXY:+HTTP_PROXY="$ALL_PROXY" HTTPS_PROXY="$ALL_PROXY" ALL_PROXY="$ALL_PROXY"} \
     ./remake -b s905d -k 6.12.y -r ophub/kernel -u flippy -s 256/1024 -n mrabit )
 
 # remake ran as root, so its out/ images are root-owned; move them to the
@@ -132,11 +189,10 @@ for src in "$OPHUB_DIR"/openwrt/out/*.img.gz; do
         echo "       OTA needs it and the naming scheme requires it." >&2
         exit 1
     fi
-    # Stamp = dotted date + _HHMMSS (no ':', git/filename-safe), matching the
-    # workflow's unified scheme. ophub only encodes a date, so we always mint the
-    # full stamp locally (build/package time).
-    imgstamp="$(date '+%Y.%m.%d_%H%M%S')"
-    newname="immortalwrt_${op_version}_${bk}_${imgstamp}.img.gz"
+    # Stamp = BUILD_STAMP (resolved once above): the CI setup job's shared value,
+    # or a local mint. ophub only encodes a date, so the unified scheme's full
+    # <date>_<time> always comes from here, never ophub's name.
+    newname="immortalwrt_${op_version}_${bk}_${BUILD_STAMP}.img.gz"
     # Recompress instead of mv: ophub's gzip stored the pre-rename name in the
     # FNAME header, so `gunzip -N`/GUI tools would decompress our renamed .gz to
     # the stale name. `gzip -n` writes no name/mtime, so extraction falls back to
