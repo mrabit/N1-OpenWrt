@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Native build entry point (no Docker). By default builds BOTH profiles in
-# sequence (N1 then x86); pass a profile to build just one:
+# Native build entry point (no Docker). By default builds ALL three profiles in
+# sequence (N1, then x86, then armvirt); pass a profile to build just one:
 #
 #   bin/build.sh            # build N1, then x86, then armvirt (all)
 #   bin/build.sh N1         # Amlogic S905D bypass router only  (-> bin/build-N1.sh)

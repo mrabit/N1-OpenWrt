@@ -5,12 +5,28 @@
 # agnostic patches and feed edits. Profile-specific diy scripts (e.g.
 # armsr/armv8/N1/diy.sh) source this first, then add their own steps.
 #
+# Fail loudly on any error. Without this the script's exit code is that of its
+# last command (the FMSH rm loop, always 0), so a failed luci.patch / EasyTier
+# clone / cp would be silently swallowed — and it also masked failures from the
+# N1 wrapper's own `set -e` (it sources this via `bash`, seeing only the 0 exit).
+set -e
+
 # COMMON_DIR is exported by the caller (build lib / workflow) and points at this
 # file's directory; fall back to it when run standalone.
 : "${COMMON_DIR:=$(cd "$(dirname "$0")" && pwd)}"
 
 # Adjust source code: online-users LuCI fix (device-name aware /proc/net/arp parse).
-patch -p1 -f < "$COMMON_DIR/luci.patch"
+# Deliberately NOT fatal under set -e: this is a cosmetic LuCI fix (online-users
+# display only), and `patch -N` returns non-zero both on real drift AND when the
+# hunk is already applied — including the benign case where upstream luci fixes
+# the arp parse itself, which must NOT abort the whole build. So wrap in `if`
+# (a failing condition doesn't trip set -e): apply forward on a pristine tree,
+# else WARN and carry on. Contrast the EasyTier clone/cp below, which stays fatal.
+if patch -p1 -N -f < "$COMMON_DIR/luci.patch" >/dev/null 2>&1; then
+	: # applied (or forward-applied) cleanly
+else
+	echo "WARN: luci.patch did not apply (already fixed upstream, or drifted) — online-users LuCI fix skipped." >&2
+fi
 
 # Drop attendedsysupgrade from the default luci collection (unused, pulls extra deps).
 sed -i '/luci-app-attendedsysupgrade/d' feeds/luci/collections/luci/Makefile

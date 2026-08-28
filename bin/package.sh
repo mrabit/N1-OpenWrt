@@ -116,37 +116,62 @@ else
     echo "      losetup logic changed — re-check this patch." >&2
 fi
 
-# Stop ophub's installer from breaking AdGuardHome (root cause, verified on real
-# N1 2026-08-26). openwrt-install-amlogic (the 晶晨宝盒 "install to EMMC" script,
-# baked into the rootfs via remake's common-files overlay) does, while writing
-# the emmc rootfs:
+# Stop ophub's installer from breaking AdGuardHome (root cause, verified on a real
+# N1 flashed from a workflow image 2026-08-28). The 晶晨宝盒 "install to EMMC"
+# script (openwrt-install-amlogic) does, while writing the emmc rootfs:
 #     rm -rf usr/bin/AdGuardHome && ln -sf /mnt/${EMMC_NAME}p4/AdGuardHome usr/bin/
 # i.e. it deletes the real 32 MB binary and symlinks /usr/bin/AdGuardHome at the
-# p4 data partition — but never copies the binary into p4 (unlike docker it just
-# deletes+links). p4 is freshly formatted at install, so the link points at an
-# empty dir → init.d execve's a directory → "Permission denied" crash loop, AGH
-# never binds :53. ophub's intent ("AGH lives on the big partition") is simply
-# incomplete. We neutralise only the AGH line (leave docker's alone — we ship no
-# docker, and its handling differs); AGH's work_dir is /var/lib/adguardhome, not
-# p4, so the binary staying in /usr/bin is fully self-sufficient. Idempotent via
-# the #N1PATCH# marker; re-applied every run since the reset/clone above restores
-# the pristine file. WARN (not fail) if the anchor moves so packaging still runs.
-install_amlogic="$OPHUB_DIR/make-openwrt/openwrt-files/common-files/usr/sbin/openwrt-install-amlogic"
-agh_anchor='rm -rf usr/bin/AdGuardHome && ln -sf'
-if [ -f "$install_amlogic" ] && grep -qF "$agh_anchor" "$install_amlogic"; then
-    if ! grep -qF '#N1PATCH#' "$install_amlogic"; then
-        sed -i 's|^\([[:space:]]*\)rm -rf usr/bin/AdGuardHome && ln -sf.*|\1: #N1PATCH# AGH binary kept in rootfs; ophub'"'"'s rm+symlink-to-p4 disabled (empty p4 -> execve crash loop)|' "$install_amlogic"
+# p4 data partition — but never copies the binary into p4. Verified line-by-line
+# (cwd is emmc p2 throughout): the installer first tar-copies the running usr/
+# (incl. the real usr/bin/AdGuardHome) INTO emmc p2, then this line deletes it and
+# links to p4, and the only other p4/AdGuardHome ref is a `mkdir -p .../data`
+# (empty) — nothing ever puts the binary in p4. p4 is freshly formatted at
+# install, so the link points at an empty dir → init.d execve's a directory →
+# "Permission denied" crash loop, AGH never binds :53. (The neighbouring docker
+# line is EQUALLY broken — same symlink to an empty p4 dir — and not a no-op
+# either: its `ln -sf` still creates the symlink. It just never bites because we
+# ship no dockerd, so nothing execve's /opt/docker. AGH is the one real casualty
+# only because we DO ship AGH and its init.d execve's the symlink.) N1-only:
+# x86/armvirt boot combined-efi directly and never run this installer. AGH's work_dir is
+# /var/lib/adguardhome, not p4, so keeping the binary in /usr/bin is fully self-
+# sufficient — we just neutralise the AGH line.
+#
+# CRITICAL — where the line lives, and why an earlier patch never fired: this
+# script is NOT in the ophub repo. It ships in the luci-app-amlogic repo
+# (root/usr/sbin/openwrt-install-amlogic), and remake pulls it in at RUN TIME —
+# it clones luci-app-amlogic, `cp`s its root/usr/sbin/. into ${common_files}/
+# usr/sbin (remake ~line 555, echo "luci-app-amlogic: sbin download completed"),
+# then overlays common_files onto the rootfs (~line 913). So the file does NOT
+# exist in the ophub clone at patch time. An earlier version of this patch tested
+# `[ -f $OPHUB_DIR/make-openwrt/openwrt-files/common-files/usr/sbin/openwrt-
+# install-amlogic ]` right after clone, found nothing (it's fetched later, by
+# remake), and silently logged "upstream removed it" — so the patch NEVER applied,
+# in CI or locally, and workflow images shipped the crash loop. (The old note
+# about ophub commit 6bf6c75 "removing" the line was wrong: 6bf6c75 is an ophub
+# commit, but the line lives in luci-app-amlogic, which still ships it on main.)
+#
+# Fix: patch remake itself (same technique as the losetup workaround above) to
+# neutralise the AGH line right after remake copies luci-app-amlogic's sbin
+# scripts into ${common_files}. The injected `sed` prefixes the line with
+# `: #N1PATCH# ` (shell no-op + comment). The inner sed contains no backslashes so
+# GNU sed's `a\` text doesn't mangle it (slashes are fine — they're literal inside
+# `a\` text, not delimiters). After the sed, an injected grep re-checks that the
+# marker actually landed; if the AGH line format drifts upstream so the sed misses,
+# the grep prints a WARN instead of the patch silently no-op'ing (which would ship
+# a crash-looping AGH). Idempotent via the #N1PATCH# marker in remake; re-applied
+# every run since the reset/clone above restores pristine remake. WARN (not fail)
+# if the anchor moves so packaging still runs.
+agh_anchor='luci-app-amlogic: sbin download completed'
+if grep -qF "$agh_anchor" "$OPHUB_DIR/remake"; then
+    if ! grep -qF '#N1PATCH#' "$OPHUB_DIR/remake"; then
+        sed -i '/luci-app-amlogic: sbin download completed/a\    sed -i "/AdGuardHome && ln -sf/s/^/: #N1PATCH# /" "${common_files}/usr/sbin/openwrt-install-amlogic" 2>/dev/null || true; grep -q "#N1PATCH#" "${common_files}/usr/sbin/openwrt-install-amlogic" 2>/dev/null || echo "WARN: #N1PATCH# AGH-line pattern drifted in openwrt-install-amlogic; AGH may crash-loop on emmc" >&2' "$OPHUB_DIR/remake"
     fi
 else
-    # Not an error: ophub removed this line upstream at 6bf6c75 (the AGH rm+ln that
-    # broke emmc installs is gone from current main), so a fresh clone has nothing
-    # to patch. This branch is the expected steady state now; the patch stays only
-    # to re-neutralise the line if ophub ever brings it back.
-    echo "INFO: ophub openwrt-install-amlogic has no AGH rm+symlink line" >&2
-    echo "      (upstream removed it at 6bf6c75) — nothing to patch, AGH binary" >&2
-    echo "      stays in the rootfs as-is. If a flashed N1 later shows AGH" >&2
-    echo "      crash-looping (execve /usr/bin/AdGuardHome: Permission denied)," >&2
-    echo "      ophub reintroduced it — re-check this patch's anchor." >&2
+    echo "WARN: ophub remake luci-app-amlogic sbin anchor not found; the AGH-on-" >&2
+    echo "      emmc patch was NOT applied. If a flashed N1 shows AGH crash-" >&2
+    echo "      looping (execve /usr/bin/AdGuardHome: Permission denied, symlink" >&2
+    echo "      -> /mnt/mmcblk2p4/AdGuardHome), remake's luci-app-amlogic sbin" >&2
+    echo "      copy step changed — re-check this patch's anchor." >&2
 fi
 
 # remake reads the rootfs from ./openwrt-armsr/ (armsr/armv8 target).
