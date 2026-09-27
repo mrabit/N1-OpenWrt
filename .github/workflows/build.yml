@@ -28,7 +28,7 @@ on:
           - x86
           - armvirt
   schedule:
-    - cron: "27 18 * * *"
+    - cron: "27 18 1,15 * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
